@@ -331,13 +331,28 @@ def send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail
     return msg_id
 
 
-# ========== Step 7: 归档到多维表格 ==========
-def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text):
+# ========== Step 7: 归档到多维表格（含附件上传） ==========
+def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text, png_bytes):
     print('\n[Step 7] 归档到多维表格...')
     today = datetime.now().strftime('%Y.%m.%d')
     title = f"档口招商周报{today}"
-    # 飞书日期时间类型：传 Unix 时间戳（秒）
-    push_ts = int(time.time())
+    # 飞书日期时间类型：传毫秒级时间戳
+    push_ts = int(time.time() * 1000)
+
+    # 先上传素材获取 file_token
+    print('  [Step 7.1] 上传图表素材...')
+    files = {
+        'file': ('chart.png', io.BytesIO(png_bytes), 'image/png')
+    }
+    data = {
+        'file_name': 'chart.png',
+        'parent_type': 'bitable',
+        'parent_node': BASE_TOKEN,
+        'size': str(len(png_bytes))
+    }
+    upload_result = api_call('POST', '/drive/v1/medias/upload_all', token, data=data, files=files)
+    file_token = upload_result.get('file_token', '')
+    print(f"  file_token: {file_token}")
 
     records_data = [{
         'fields': {
@@ -346,7 +361,8 @@ def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text)
             '待招商': total_vacs,
             '空置率(%)': round(vac_rate / 100, 4),   # 小数 → 飞书百分比字段
             '待招商项目数': vac_projects_count,
-            '招商情况': detail_text
+            '招商情况': detail_text,
+            '柱形图': [{'file_token': file_token}] if file_token else []
         }
     }]
     result = api_call('POST',
@@ -355,21 +371,6 @@ def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text)
     record_id = result.get('records', [{}])[0].get('record_id', '')
     print(f"  归档记录已创建: {record_id}")
     return record_id
-
-
-# ========== Step 8: 上传柱形图附件 ==========
-def upload_chart_attachment(token, record_id, png_bytes):
-    print('\n[Step 8] 上传柱形图到归档记录...')
-    files = {
-        'file': ('chart.png', io.BytesIO(png_bytes), 'image/png')
-    }
-    data = {'field_id': CHART_FIELD_ID}
-    result = api_call('POST',
-                       f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/{record_id}/attachments',
-                       token, data=data, files=files)
-    attach_id = result.get('attachment_id', '')
-    print(f"  附件已上传: {attach_id}")
-    return attach_id
 
 
 # ========== 主流程 ==========
@@ -385,10 +386,7 @@ def main():
     image_key = upload_image(token, png_bytes)
     detail_text = build_detail_text(projects, vac_projects)
     send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail_text)
-    record_id = archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text)
-    # 暂时跳过附件上传，等API路径确认后再启用
-    # upload_chart_attachment(token, record_id, png_bytes)
-    print("  [INFO] 附件上传已跳过（API路径待确认）")
+    record_id = archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text, png_bytes)
 
     print('\n=== 全部完成 ===\n')
 
