@@ -225,13 +225,20 @@ def parse_and_stats(this_week_records, last_week_records):
 
 
 def _get_field_value(fields, field_name, numeric=False):
-    """从 fields 中提取字段值"""
+    """从 fields 中提取字段值，兼容单选/多选字典格式"""
     val = fields.get(field_name)
     if val is None:
         return None
     
     if isinstance(val, list):
         val = val[0] if val else None
+    
+    if val is None:
+        return None
+    
+    # 单选/多选字段返回 {"text": "xxx", "id": "optXXX"} 格式
+    if isinstance(val, dict):
+        val = val.get('text', '')
     
     if numeric and val is not None:
         try:
@@ -618,12 +625,12 @@ def build_analysis_text(stats, project_costs, supplier_stats, potential_savings,
     # 筛选需要预警的（价差>=15%）
     alerts = [s for s in stats if s['alert_level'] == 'high']
     
-    # 1. 重点关注（严重超标）— 显示全部，不限制数量
+    # 1. 重点关注（严重超标）— 只显示TOP10
     if alerts:
-        lines.append(f"🔴 重点关注（价差≥15%）：{len(alerts)} 种食材")
+        lines.append(f"🔴 重点关注（价差≥15%）：共{len(alerts)} 种，以下TOP10")
         lines.append("")
         
-        for s in alerts:  # 显示全部
+        for s in alerts[:10]:  # 只显示TOP10
             veg = s['veg_name']
             max_p = s['max_price']
             min_p = s['min_price']
