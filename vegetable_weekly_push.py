@@ -143,6 +143,13 @@ def fetch_records(token):
                         token, params=params)
         items = data.get('items', [])
         
+        # 调试：打印第一条记录中关键字段的原始值
+        if items and not page_token:
+            debug_fields = items[0].get('fields', {})
+            _log(f"[DEBUG] 统一食材名称原始值: {repr(debug_fields.get('统一食材名称'))}")
+            _log(f"[DEBUG] 项目名称原始值: {repr(debug_fields.get('项目名称'))}")
+            _log(f"[DEBUG] 供应商名称原始值: {repr(debug_fields.get('供应商名称'))}")
+        
         for item in items:
             fields = item.get('fields', {})
             date_val = fields.get('日期')
@@ -531,7 +538,7 @@ def _calculate_project_costs(veg_data, this_week_records, last_week_records):
 
 
 def _calculate_data_completeness(records):
-    """计算数据完整度（区分周末休息和缺填）"""
+    """计算各项目本周实际填报天数"""
     # 按项目统计本周有数据的天数
     project_days = {}
     
@@ -551,31 +558,17 @@ def _calculate_data_completeness(records):
             except:
                 continue
         
-        weekday = record_date.weekday()  # 0=周一, 6=周日
-        
         if project not in project_days:
             project_days[project] = set()
         
-        project_days[project].add(weekday)
+        project_days[project].add(record_date.strftime('%m/%d'))
     
-    # 计算完整度
+    # 统计实际填报天数
     completeness = {}
     for project, days in project_days.items():
-        is_weekend_open = PROJECT_WEEKEND_OPEN.get(project, True)
-        
-        if is_weekend_open:
-            # 大学/大专：应该7天都有数据
-            expected_days = 7
-        else:
-            # 初高中：应该只有5天（周一到周五）
-            expected_days = 5
-        
         actual_days = len(days)
         completeness[project] = {
             'actual_days': actual_days,
-            'expected_days': expected_days,
-            'completeness_rate': actual_days / expected_days if expected_days > 0 else 0,
-            'is_weekend_open': is_weekend_open
         }
     
     return completeness
@@ -805,11 +798,16 @@ def build_analysis_text(stats, project_costs, supplier_stats, potential_savings,
     
     # 4. 数据完整度监控
     if data_completeness:
-        lines.append("📊 数据完整度：")
-        for project, data in sorted(data_completeness.items(), key=lambda x: x[1]['completeness_rate']):
-            status = "✅" if data['completeness_rate'] >= 0.8 else "⚠️"
-            weekend_note = "（周末营业）" if data['is_weekend_open'] else "（周末休息）"
-            lines.append(f"  {status} {project}：{data['actual_days']}/{data['expected_days']}天 {weekend_note}")
+        lines.append("📊 本周填报情况：")
+        for project, data in sorted(data_completeness.items(), key=lambda x: x[1]['actual_days']):
+            days = data['actual_days']
+            if days >= 7:
+                status = "✅"
+            elif days >= 5:
+                status = "⚠️"
+            else:
+                status = "🔴"
+            lines.append(f"  {status} {project}：已填报 {days} 天")
         lines.append("")
     
     # 5. 潜在节省金额（按本月最低价采购）
