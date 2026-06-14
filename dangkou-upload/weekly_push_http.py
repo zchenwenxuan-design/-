@@ -144,18 +144,15 @@ def fetch_records(token):
 
 # ========== Step 2: 探测字段名 + 解析统计 ==========
 def detect_field_names(sample_fields):
-    """自动探测字段名（模糊匹配中文名）"""
+    """自动探测字段名（精确匹配）"""
     result = {}
     for fname in sample_fields:
-        fl = fname.lower()
-        if ('项目' in fname or '名称' in fname) and 'project' not in result:
+        if fname == '项目名称':
             result['project'] = fname
-        if '班组' in fname or '编号' in fname or '班' in fname:
-            if 'snum' not in result:
-                result['snum'] = fname
-        if '状态' in fname or '营业' in fname:
-            if 'status' not in result:
-                result['status'] = fname
+        if fname == '班组编号':
+            result['snum'] = fname
+        if fname == '营业状态':
+            result['status'] = fname
     return result
 
 
@@ -389,7 +386,9 @@ def main():
     detail_text = build_detail_text(projects, vac_projects)
     send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail_text)
     record_id = archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text)
-    upload_chart_attachment(token, record_id, png_bytes)
+    # 暂时跳过附件上传，等API路径确认后再启用
+    # upload_chart_attachment(token, record_id, png_bytes)
+    print("  [INFO] 附件上传已跳过（API路径待确认）")
 
     print('\n=== 全部完成 ===\n')
 
