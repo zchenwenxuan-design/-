@@ -29,6 +29,7 @@ BASE_TOKEN = 'CWRUbNJLZa5BmSsuWx1cvcoFnsd'
 TABLE_DETAIL = 'tbl4aO9rKwKxlXzR'  # 「青菜」填报明细
 TABLE_ARCHIVE = 'tbl1ShD40AB0BeC0'  # 「青菜」分析看板
 TABLE_SUPPLIER = 'tblgGb0oFtei8uAx'  # 供应商表
+TABLE_PRODUCT = 'tblmFgpK8ZrMNX0H'  # 产品-基础信息表（用于解析食材名称）
 
 API_BASE = 'https://open.feishu.cn/open-apis'
 
@@ -36,13 +37,14 @@ API_BASE = 'https://open.feishu.cn/open-apis'
 ALERT_THRESHOLD = 0.15  # 15%
 
 # 项目类型配置（周末是否营业）
+# 用户确认：除连平中学外，其他都是大学/大专，周末均营业
 PROJECT_WEEKEND_OPEN = {
     '嘉应学院': True,      # 大学，周末营业
     '天河交通': True,      # 大专，周末营业
-    '花都工商': False,     # 初高中，周末休息
-    '清远建设': False,     # 初高中，周末休息
+    '花都工商': True,      # 大学/大专，周末营业
+    '清远建设': True,      # 大学/大专，周末营业
     '清远交通': True,      # 大专，周末营业
-    '连平中学': False,     # 初高中，周末休息
+    '连平中学': False,     # 高中，偶尔双休
     '仲恺学院': True,      # 大学，周末营业
     '海运学院': True,      # 大专，周末营业
     '天河生态': True,      # 大学，周末营业
@@ -171,7 +173,7 @@ def fetch_records(token):
 
 
 # ========== Step 2: 解析数据并统计 ==========
-def parse_and_stats(this_week_records, last_week_records, supplier_map):
+def parse_and_stats(this_week_records, last_week_records, supplier_map, option_map):
     """解析青菜数据，统计单价差异和预警"""
     print('\n[Step 2] 解析数据并统计...')
     
@@ -184,8 +186,8 @@ def parse_and_stats(this_week_records, last_week_records, supplier_map):
     for rec in this_week_records:
         f = rec.get('fields', {})
         
-        # 提取字段
-        veg_name = _get_field_value(f, '统一食材名称')
+        # 提取字段（传入 option_map 解析食材名称）
+        veg_name = _get_field_value(f, '统一食材名称', option_map=option_map)
         project = _get_field_value(f, '项目名称')
         price = _get_field_value(f, '单价', numeric=True)
         qty = _get_field_value(f, '数量', numeric=True)
@@ -227,14 +229,10 @@ def parse_and_stats(this_week_records, last_week_records, supplier_map):
     return stats, project_costs, veg_data, data_completeness
 
 
-def _get_field_value(fields, field_name, numeric=False):
+def _get_field_value(fields, field_name, numeric=False, option_map=None):
     """
-    从 fields 中提取字段值，兼容飞书所有字段类型：
-    - text/number/select: 直接返回值（string 或 number）
-    - lookup: {"type":1, "value": [{"text":"xxx", "type":"text"}]}
-    - link:   {"link_record_ids": ["recXXX"]}
-    - formula: 直接返回计算结果（number 或 string）
-    - datetime: int（毫秒时间戳）
+    从 fields 中提取字段值，兼容飞书所有字段类型。
+    option_map: 若提供，用于将 optXXX 解析为中文名称。
     """
     val = fields.get(field_name)
     if val is None:
@@ -257,9 +255,9 @@ def _get_field_value(fields, field_name, numeric=False):
     # link 字段: {"link_record_ids": ["recXXX", ...]}
     if isinstance(val, dict) and 'link_record_ids' in val:
         ids = val.get('link_record_ids', [])
-        return ids[0] if ids else None  # 返回 record_id，由调用方解析
+        return ids[0] if ids else None
 
-    # 列表类型（多选等）
+    # 列表类型（多选/关联等）
     if isinstance(val, list):
         val = val[0] if val else None
 
@@ -270,6 +268,12 @@ def _get_field_value(fields, field_name, numeric=False):
     if isinstance(val, dict):
         val = val.get('text') or val.get('id', '')
 
+    # 若拿到的是 option_id 且提供了映射表，尝试解析为中文
+    if option_map and isinstance(val, str) and val.startswith('opt'):
+        mapped = option_map.get(val)
+        if mapped:
+            val = mapped
+
     if numeric and val is not None:
         try:
             return float(val)
@@ -277,6 +281,56 @@ def _get_field_value(fields, field_name, numeric=False):
             return None
 
     return str(val).strip() if val else None
+
+
+def fetch_product_option_map(token):
+    """
+    查询「产品-基础信息」表，建立 option_id -> 食材名称 的映射。
+    该表的 '🚩统一食材名称' 是单选字段，OpenAPI 对 lookup 返回的是 option_id，
+    需要通过此映射解析为中文名称。
+    """
+    print('\n[Step 1.2] 加载食材名称映射...')
+    option_map = {}
+    page_token = None
+
+    while True:
+        params = {'page_size': 500}
+        if page_token:
+            params['page_token'] = page_token
+
+        data = api_call('GET', f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_PRODUCT}/records',
+                        token, params=params)
+        items = data.get('items', [])
+
+        for item in items:
+            fields = item.get('fields', {})
+            # 尝试多种方式获取食材名称
+            veg_name = None
+            # 方式1: 直接取字段值（如果是字符串）
+            raw = fields.get('🚩统一食材名称')
+            if isinstance(raw, str):
+                veg_name = raw
+            elif isinstance(raw, list) and raw:
+                veg_name = raw[0] if isinstance(raw[0], str) else raw[0].get('text') if isinstance(raw[0], dict) else None
+            elif isinstance(raw, dict):
+                veg_name = raw.get('text') or raw.get('id', '')
+
+            if veg_name:
+                # 同时用 record_id 作为 key（lookup 可能返回 record_id）
+                record_id = item.get('record_id', '')
+                if record_id:
+                    option_map[record_id] = veg_name
+                # 如果字段值本身是 optXXX，也加入映射
+                if isinstance(raw, str) and raw.startswith('opt'):
+                    option_map[raw] = veg_name
+
+        if not data.get('has_more'):
+            break
+        page_token = data.get('page_token')
+        time.sleep(0.2)
+
+    print(f"  已加载 {len(option_map)} 个食材名称映射")
+    return option_map
 
 
 def fetch_supplier_names(token):
@@ -592,14 +646,14 @@ def _calculate_supplier_stats(veg_data):
     return supplier_stats
 
 
-def _calculate_potential_savings(records):
+def _calculate_potential_savings(records, option_map=None):
     """计算潜在节省金额（按本月最低价采购，仅本周数据）"""
     total_savings = 0
     
     actual_cost = {}
     for rec in records:
         f = rec.get('fields', {})
-        veg_name = _get_field_value(f, '统一食材名称')
+        veg_name = _get_field_value(f, '统一食材名称', option_map=option_map)
         project = _get_field_value(f, '项目名称')
         amount = _get_field_value(f, '金额', numeric=True)
         qty = _get_field_value(f, '数量', numeric=True)
@@ -881,8 +935,12 @@ def main():
     # 预加载供应商名称映射（link 字段只返回 record_id，需要解析）
     supplier_map = fetch_supplier_names(token)
     
+    # 预加载食材名称映射（lookup 字段返回 option_id，需要解析为中文）
+    option_map = fetch_product_option_map(token)
+    
     this_week_records, last_week_records = fetch_records(token)
-    stats, project_costs, veg_data, data_completeness = parse_and_stats(this_week_records, last_week_records, supplier_map)
+    stats, project_costs, veg_data, data_completeness = parse_and_stats(
+        this_week_records, last_week_records, supplier_map, option_map)
     
     if not stats:
         print("本周无青菜采购数据，跳过推送")
@@ -890,7 +948,7 @@ def main():
     
     # 计算供应商统计和潜在节省
     supplier_stats = _calculate_supplier_stats(veg_data)
-    potential_savings = _calculate_potential_savings(this_week_records)
+    potential_savings = _calculate_potential_savings(this_week_records, option_map)
     
     png_bytes = generate_chart(stats)
     image_key = upload_image(token, png_bytes)
