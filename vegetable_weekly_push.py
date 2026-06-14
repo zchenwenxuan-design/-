@@ -28,6 +28,7 @@ CHAT_ID = os.environ.get('FEISHU_CHAT_ID', 'oc_214e828c8acf75a362ca87df4e96eb2e'
 BASE_TOKEN = 'CWRUbNJLZa5BmSsuWx1cvcoFnsd'
 TABLE_DETAIL = 'tbl4aO9rKwKxlXzR'  # 「青菜」填报明细
 TABLE_ARCHIVE = 'tbl1ShD40AB0BeC0'  # 「青菜」分析看板
+TABLE_SUPPLIER = 'tblgGb0oFtei8uAx'  # 供应商表
 
 API_BASE = 'https://open.feishu.cn/open-apis'
 
@@ -170,7 +171,7 @@ def fetch_records(token):
 
 
 # ========== Step 2: 解析数据并统计 ==========
-def parse_and_stats(this_week_records, last_week_records):
+def parse_and_stats(this_week_records, last_week_records, supplier_map):
     """解析青菜数据，统计单价差异和预警"""
     print('\n[Step 2] 解析数据并统计...')
     
@@ -189,7 +190,9 @@ def parse_and_stats(this_week_records, last_week_records):
         price = _get_field_value(f, '单价', numeric=True)
         qty = _get_field_value(f, '数量', numeric=True)
         amount = _get_field_value(f, '金额', numeric=True)
-        supplier = _get_field_value(f, '供应商名称')
+        # 供应商名称是 link 字段，返回 record_id，需要解析
+        supplier_id = _get_field_value(f, '供应商名称')
+        supplier = resolve_supplier_id(supplier_id, supplier_map)
         date_val = f.get('日期')
         
         if not veg_name or not project or price is None:
@@ -225,28 +228,97 @@ def parse_and_stats(this_week_records, last_week_records):
 
 
 def _get_field_value(fields, field_name, numeric=False):
-    """从 fields 中提取字段值，兼容单选/多选字典格式"""
+    """
+    从 fields 中提取字段值，兼容飞书所有字段类型：
+    - text/number/select: 直接返回值（string 或 number）
+    - lookup: {"type":1, "value": [{"text":"xxx", "type":"text"}]}
+    - link:   {"link_record_ids": ["recXXX"]}
+    - formula: 直接返回计算结果（number 或 string）
+    - datetime: int（毫秒时间戳）
+    """
     val = fields.get(field_name)
     if val is None:
         return None
-    
+
+    # lookup 字段: {"type": 1, "value": [{"text": "生菜", "type": "text"}, ...]}
+    if isinstance(val, dict) and 'value' in val:
+        value_list = val.get('value', [])
+        if isinstance(value_list, list) and value_list:
+            first = value_list[0]
+            if isinstance(first, dict) and 'text' in first:
+                val = first['text']
+            elif isinstance(first, str):
+                val = first
+            else:
+                val = str(first)
+        else:
+            return None
+
+    # link 字段: {"link_record_ids": ["recXXX", ...]}
+    if isinstance(val, dict) and 'link_record_ids' in val:
+        ids = val.get('link_record_ids', [])
+        return ids[0] if ids else None  # 返回 record_id，由调用方解析
+
+    # 列表类型（多选等）
     if isinstance(val, list):
         val = val[0] if val else None
-    
+
     if val is None:
         return None
-    
-    # 单选/多选字段返回 {"text": "xxx", "id": "optXXX"} 格式
+
+    # dict 类型兜底（单选等）
     if isinstance(val, dict):
-        val = val.get('text', '')
-    
+        val = val.get('text') or val.get('id', '')
+
     if numeric and val is not None:
         try:
             return float(val)
-        except:
+        except (ValueError, TypeError):
             return None
-    
+
     return str(val).strip() if val else None
+
+
+def fetch_supplier_names(token):
+    """预加载供应商表，建立 record_id -> 供应商名称 的映射"""
+    print('\n[Step 1.1] 加载供应商名称映射...')
+    supplier_map = {}
+    page_token = None
+
+    while True:
+        params = {'page_size': 500, 'field_names': '["供应商名称"]'}
+        if page_token:
+            params['page_token'] = page_token
+
+        data = api_call('GET', f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_SUPPLIER}/records',
+                        token, params=params)
+        items = data.get('items', [])
+
+        for item in items:
+            record_id = item.get('record_id', '')
+            fields = item.get('fields', {})
+            name = _get_field_value(fields, '供应商名称')
+            if name:
+                supplier_map[record_id] = name
+
+        if not data.get('has_more'):
+            break
+        page_token = data.get('page_token')
+        time.sleep(0.2)
+
+    print(f"  已加载 {len(supplier_map)} 个供应商名称")
+    return supplier_map
+
+
+def resolve_supplier_id(supplier_id, supplier_map):
+    """将供应商 record_id 解析为可读名称"""
+    if not supplier_id:
+        return None
+    name = supplier_map.get(supplier_id)
+    if name:
+        return name
+    # 如果找不到映射，返回 ID 的后6位作为标识
+    return f"供应商({supplier_id[-6:]})"
 
 
 def _calculate_stats(veg_data):
@@ -783,7 +855,7 @@ def archive_record(token, stats, project_costs, analysis_text, png_bytes):
         'fields': {
             '标题': title,
             '类别': '每周',
-            '分析时间': push_ts,
+            '推送时间': push_ts,
             '采购总量': total_qty,
             '采购总金额': round(total_amount, 2),
             '异常食材数': alert_count,
@@ -806,8 +878,11 @@ def main():
     print('=== 青菜价格异常预警周报 ===\n')
     token = get_tenant_token()
     
+    # 预加载供应商名称映射（link 字段只返回 record_id，需要解析）
+    supplier_map = fetch_supplier_names(token)
+    
     this_week_records, last_week_records = fetch_records(token)
-    stats, project_costs, veg_data, data_completeness = parse_and_stats(this_week_records, last_week_records)
+    stats, project_costs, veg_data, data_completeness = parse_and_stats(this_week_records, last_week_records, supplier_map)
     
     if not stats:
         print("本周无青菜采购数据，跳过推送")
