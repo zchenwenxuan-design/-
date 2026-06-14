@@ -448,6 +448,113 @@ def _calculate_data_completeness(records):
     return completeness
 
 
+def _calculate_supplier_stats(veg_data):
+    """计算供应商评分：服务项目、异常率、均价偏离、综合评分、等级"""
+    supplier_stats = {}
+    
+    for veg_name, projects in veg_data.items():
+        all_prices = []
+        for project, data in projects.items():
+            all_prices.extend(data['prices'])
+        week_avg = sum(all_prices) / len(all_prices) if all_prices else 0
+        
+        for project, data in projects.items():
+            for supplier in data['suppliers']:
+                if supplier not in supplier_stats:
+                    supplier_stats[supplier] = {
+                        'projects': set(),
+                        'total_vegs': 0,
+                        'alert_vegs': 0,
+                        'price_deviations': [],
+                        'main_vegs': []
+                    }
+                
+                supplier_stats[supplier]['projects'].add(project)
+                supplier_stats[supplier]['total_vegs'] += 1
+                supplier_stats[supplier]['main_vegs'].append(veg_name)
+                
+                avg_price = sum(data['prices']) / len(data['prices']) if data['prices'] else 0
+                if week_avg > 0:
+                    deviation = (avg_price - week_avg) / week_avg
+                    supplier_stats[supplier]['price_deviations'].append(deviation)
+                
+                if week_avg > 0 and deviation >= ALERT_THRESHOLD:
+                    supplier_stats[supplier]['alert_vegs'] += 1
+    
+    for supplier in supplier_stats:
+        total = supplier_stats[supplier]['total_vegs']
+        alerts = supplier_stats[supplier]['alert_vegs']
+        deviations = supplier_stats[supplier]['price_deviations']
+        
+        alert_rate = alerts / total if total > 0 else 0
+        supplier_stats[supplier]['alert_rate'] = alert_rate
+        
+        avg_deviation = sum(deviations) / len(deviations) if deviations else 0
+        supplier_stats[supplier]['avg_deviation'] = avg_deviation
+        
+        alert_score = max(0, 40 - alert_rate * 200)
+        deviation_score = max(0, 40 - abs(avg_deviation) * 100)
+        project_score = min(20, len(supplier_stats[supplier]['projects']) * 10)
+        total_score = alert_score + deviation_score + project_score
+        supplier_stats[supplier]['score'] = round(total_score)
+        
+        if total_score >= 85:
+            supplier_stats[supplier]['grade'] = 'A ⭐'
+        elif total_score >= 70:
+            supplier_stats[supplier]['grade'] = 'B'
+        elif total_score >= 55:
+            supplier_stats[supplier]['grade'] = 'C ⚠️'
+        else:
+            supplier_stats[supplier]['grade'] = 'D ❌'
+        
+        supplier_stats[supplier]['projects'] = list(supplier_stats[supplier]['projects'])
+        supplier_stats[supplier]['main_vegs'] = list(set(supplier_stats[supplier]['main_vegs']))
+    
+    return supplier_stats
+
+
+def _calculate_potential_savings(records):
+    """计算潜在节省金额（按本月最低价采购，仅本周数据）"""
+    total_savings = 0
+    
+    actual_cost = {}
+    for rec in records:
+        f = rec.get('fields', {})
+        veg_name = _get_field_value(f, '统一食材名称')
+        project = _get_field_value(f, '项目名称')
+        amount = _get_field_value(f, '金额', numeric=True)
+        qty = _get_field_value(f, '数量', numeric=True)
+        month_low = _get_field_value(f, '本月最低价', numeric=True)
+        
+        if not veg_name or not project:
+            continue
+        
+        if veg_name not in actual_cost:
+            actual_cost[veg_name] = {}
+        if project not in actual_cost[veg_name]:
+            actual_cost[veg_name][project] = {'total_amount': 0, 'total_qty': 0, 'month_low': 0}
+        
+        actual_cost[veg_name][project]['total_amount'] += (amount or 0)
+        actual_cost[veg_name][project]['total_qty'] += (qty or 0)
+        if month_low and month_low > 0:
+            actual_cost[veg_name][project]['month_low'] = month_low
+    
+    for veg_name, projects in actual_cost.items():
+        all_month_low = [p['month_low'] for p in projects.values() if p['month_low'] > 0]
+        if not all_month_low:
+            continue
+        best_low = min(all_month_low)
+        
+        for project, data in projects.items():
+            if data['month_low'] > 0 and data['total_qty'] > 0:
+                actual = data['total_amount']
+                ideal = best_low * data['total_qty']
+                if actual > ideal:
+                    total_savings += (actual - ideal)
+    
+    return total_savings
+
+
 # ========== Step 3: 生成分析图表 ==========
 def generate_chart(stats):
     """生成TOP10价差食材对比图"""
