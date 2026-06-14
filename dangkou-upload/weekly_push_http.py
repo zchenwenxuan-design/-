@@ -7,11 +7,14 @@
   FEISHU_APP_ID       - 飞书应用 App ID
   FEISHU_APP_SECRET   - 飞书应用 App Secret
   FEISHU_CHAT_ID      - 推送群 chat_id（默认 oc_214e828c8acf75a362ca87df4e96eb2e）
+  FEISHU_FIELD_PROJECT - （可选）项目名称字段名，默认自动探测
+  FEISHU_FIELD_SNUM    - （可选）班组编号字段名，默认自动探测
+  FEISHU_FIELD_STATUS  - （可选）营业状态字段名，默认自动探测
 
 依赖: pip install requests
 """
 
-import os, json, sys, time, io, traceback
+import os, json, sys, time, io
 from datetime import datetime
 
 try:
@@ -33,6 +36,8 @@ CHART_FIELD_ID = 'fldxPLOcoS'
 API_BASE = 'https://open.feishu.cn/open-apis'
 
 # ========== 工具函数 ==========
+import traceback
+
 def _log(msg, prefix="[INFO]"):
     print(f"{prefix} {msg}", flush=True)
 
@@ -59,7 +64,7 @@ def api_call(method, path, token=None, json_data=None, files=None, data=None, pa
                 method, url,
                 data=data, files=files,
                 params=params, headers=headers, timeout=30,
-                proxies={'http': None, 'https': None}, trust_env=False
+                proxies={'http': None, 'https': None}
             )
         elif json_data is not None:
             headers['Content-Type'] = 'application/json; charset=utf-8'
@@ -67,13 +72,13 @@ def api_call(method, path, token=None, json_data=None, files=None, data=None, pa
                 method, url,
                 json=json_data,
                 params=params, headers=headers, timeout=30,
-                proxies={'http': None, 'https': None}, trust_env=False
+                proxies={'http': None, 'https': None}
             )
         else:
             resp = requests.request(
                 method, url,
                 params=params, headers=headers, timeout=30,
-                proxies={'http': None, 'https': None}, trust_env=False
+                proxies={'http': None, 'https': None}
             )
     except requests.exceptions.ConnectionError as e:
         _log(f"网络连接失败: {e}", "[ERROR]")
@@ -118,7 +123,7 @@ def get_tenant_token():
 
 # ========== Step 1: 拉取班组数据 ==========
 def fetch_records(token):
-    _log("拉取班组表数据...")
+    print('\n[Step 1] 拉取班组表数据...')
     all_records = []
     page_token = None
     while True:
@@ -133,91 +138,149 @@ def fetch_records(token):
             break
         page_token = data.get('page_token')
         time.sleep(0.3)
-    _log(f"共 {len(all_records)} 条记录")
+    print(f"  共 {len(all_records)} 条记录")
     return all_records
 
 
-# ========== Step 2: 解析统计 ==========
+# ========== Step 2: 探测字段名 + 解析统计 ==========
+def detect_field_names(sample_fields):
+    """自动探测字段名（模糊匹配中文名）"""
+    result = {}
+    for fname in sample_fields:
+        fl = fname.lower()
+        if ('项目' in fname or '名称' in fname) and 'project' not in result:
+            result['project'] = fname
+        if '班组' in fname or '编号' in fname or '班' in fname:
+            if 'snum' not in result:
+                result['snum'] = fname
+        if '状态' in fname or '营业' in fname:
+            if 'status' not in result:
+                result['status'] = fname
+    return result
+
+
+def parse_field_value(fields, field_name):
+    """从 fields dict 中取值，兼容标量/list"""
+    val = fields.get(field_name)
+    if val is None:
+        return ''
+    if isinstance(val, list):
+        return str(val[0]).strip() if val else ''
+    return str(val).strip()
+
+
 def parse_and_stats(records):
-    """从记录列表解析项目、班组编号、状态，按项目分组统计"""
-    projects = {}
+    print('\n[Step 2] 解析数据并统计...')
+
+    if not records:
+        raise RuntimeError('未拉取到任何记录，请检查 Base Token 和表 ID')
+
+    # 探测字段名
+    sample_fields = records[0].get('fields', {})
+    field_map = detect_field_names(sample_fields)
+
+    # 允许环境变量覆盖
+    for key, env_key in [('project', 'FEISHU_FIELD_PROJECT'),
+                          ('snum', 'FEISHU_FIELD_SNUM'),
+                          ('status', 'FEISHU_FIELD_STATUS')]:
+        env_val = os.environ.get(env_key)
+        if env_val:
+            field_map[key] = env_val
+            print(f"  使用环境变量字段名 {key}={env_val}")
+
+    print(f"  字段映射: {field_map}")
+
+    if 'project' not in field_map or 'snum' not in field_map:
+        print("  错误：无法自动识别字段名，请设置环境变量：")
+        print("  FEISHU_FIELD_PROJECT, FEISHU_FIELD_SNUM, FEISHU_FIELD_STATUS")
+        raise RuntimeError("字段名无法识别，请在 GitHub Secrets 中设置环境变量")
+
+    raw = []
     for rec in records:
-        fields = rec.get('fields', {})
-        # 自动探测字段名（支持模糊匹配）
-        pname = None
-        snum = None
-        status = None
-        for k, v in fields.items():
-            v_str = str(v).strip() if v else ''
-            if '项目' in k and not pname:
-                pname = v_str
-            elif ('班组' in k or '编号' in k or '档口' in k) and not snum:
-                snum = v_str
-            elif ('状态' in k or '营业' in k) and not status:
-                status = v_str
-        if not pname or not snum:
-            continue
+        f = rec.get('fields', {})
+        pname = parse_field_value(f, field_map['project'])
+        snum = parse_field_value(f, field_map['snum'])
+        status = parse_field_value(f, field_map.get('status', ''))
+        if pname and snum:
+            raw.append((pname, snum, status))
+
+    print(f"  有效记录: {len(raw)} 条")
+
+    projects = {}
+    for pname, snum, status in raw:
         if pname not in projects:
             projects[pname] = {'ops': 0, 'vacs': 0, 'vac_nums': []}
-        if status in ('待招商', '招商中', '空置'):
+        if status == '营业中':
+            projects[pname]['ops'] += 1
+        elif status == '待招商':
             projects[pname]['vacs'] += 1
             projects[pname]['vac_nums'].append(snum)
-        elif status in ('营业中', '已出租', '在租'):
-            projects[pname]['ops'] += 1
-    return projects
+
+    # 只保留有待招商的项目
+    vac_projects = {k: v for k, v in projects.items() if v['vacs'] > 0}
+    total_vacs = sum(v['vacs'] for v in vac_projects.values())
+    total_all = sum(v['ops'] + v['vacs'] for v in vac_projects.values())
+    vac_rate = total_vacs / total_all * 100 if total_all else 0
+
+    print(f"  有待招商项目: {len(vac_projects)} 个")
+    print(f"  待招商档口数: {total_vacs}")
+    print(f"  空置率: {vac_rate:.2f}%")
+    return projects, vac_projects, total_vacs, total_all, vac_rate
 
 
 # ========== Step 3: 生成柱形图 ==========
-def gen_chart(vac_projects):
-    _log("生成柱形图...")
-    labels = [p[0] for p in vac_projects]
-    ops_data = [p[1]['ops'] for p in vac_projects]
-    vac_data = [p[1]['vacs'] for p in vac_projects]
-
+def generate_chart(vac_projects):
+    print('\n[Step 3] 生成柱形图...')
+    import urllib.parse
+    sorted_items = sorted(vac_projects.items(), key=lambda x: x[1]['vacs'], reverse=True)
     chart_config = {
-        "type": "horizontalBar",
-        "data": {
-            "labels": labels,
-            "datasets": [
-                {"label": "营业中", "data": ops_data, "backgroundColor": "#5B8FF9"},
-                {"label": "待招商", "data": vac_data, "backgroundColor": "#F46649"}
+        'type': 'horizontalBar',
+        'data': {
+            'labels': [k for k, v in sorted_items],
+            'datasets': [
+                {'label': '营业中', 'data': [v['ops'] for k, v in sorted_items], 'backgroundColor': '#378ADD'},
+                {'label': '待招商', 'data': [v['vacs'] for k, v in sorted_items], 'backgroundColor': '#EF9F27'}
             ]
         },
-        "options": {
-            "scales": {
-                "xAxes": [{"stacked": True, "ticks": {"beginAtZero": True}}],
-                "yAxes": [{"stacked": True}]
+        'options': {
+            'scales': {
+                'xAxes': [{'stacked': True, 'ticks': {'stepSize': 5}}],
+                'yAxes': [{'stacked': True}]
             },
-            "plugins": {"datalabels": {"display": False}}
+            'legend': {'position': 'bottom', 'labels': {'fontSize': 13, 'padding': 16, 'usePointStyle': True}}
         }
     }
-    chart_url = f"https://quickchart.io/chart?c={json.dumps(chart_config)}"
-    resp = requests.get(chart_url, timeout=30)
-    with open('chart_tmp.png', 'wb') as f:
-        f.write(resp.content)
-    _log("柱形图保存成功")
+    chart_json = json.dumps(chart_config, separators=(',', ':'))
+    url = 'https://quickchart.io/chart?w=600&h=350&c=' + urllib.parse.quote(chart_json)
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    png_bytes = resp.content
+    print(f"  图表大小: {len(png_bytes)//1024} KB")
+    return png_bytes
 
 
-# ========== Step 4: 上传图片 ==========
-def upload_image(token):
-    _log("上传柱形图...")
-    with open('chart_tmp.png', 'rb') as f:
-        img_data = f.read()
+# ========== Step 4: 上传图片到飞书 IM ==========
+def upload_image(token, png_bytes):
+    print('\n[Step 4] 上传图片到飞书 IM...')
+    files = {
+        'image': ('chart.png', io.BytesIO(png_bytes), 'image/png')
+    }
     data = {'image_type': 'message'}
-    files = {'image': ('chart.png', img_data, 'image/png')}
     result = api_call('POST', '/im/v1/images', token, data=data, files=files)
-    image_key = result['image_key']
-    _log(f"image_key: {image_key}")
+    image_key = result.get('image_key', '')
+    print(f"  image_key: {image_key}")
     return image_key
 
 
-# ========== Step 5: 生成推送内容 ==========
-def build_detail_text(vac_projects):
-    lines = []
+# ========== Step 5: 构建明细文本 ==========
+def build_detail_text(projects, vac_projects):
     def snum_key(s):
         try: return int(s)
         except: return 9999
-    for i, (pname, pdata) in enumerate(vac_projects):
+
+    vac_list = sorted(vac_projects.items(), key=lambda x: x[1]['vacs'], reverse=True)
+    lines = []
+    for i, (pname, pdata) in enumerate(vac_list):
         vac_nums = sorted(pdata['vac_nums'], key=snum_key)
         f1 = [s for s in vac_nums if 0 < int(s) < 200]
         f2 = [s for s in vac_nums if 200 <= int(s) < 300]
@@ -238,7 +301,7 @@ def build_detail_text(vac_projects):
 
 # ========== Step 6: 发送卡片 ==========
 def send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail_text):
-    _log("发送卡片到群...")
+    print('\n[Step 6] 发送卡片到群...')
     today = datetime.now().strftime('%Y.%m.%d')
     card = {
         "config": {"wide_screen_mode": True},
@@ -247,93 +310,93 @@ def send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail
             "template": "blue"
         },
         "elements": [
-            {"tag": "img", "img_key": image_key, "alt": {"tag": "plain_text", "content": "待招商档口统计"}},
-            {"tag": "div", "text": {"tag": "lark_md", "content": f"**汇总**：**{vac_projects_count}** 个项目有待招商档口，共 **{total_vacs}** 个待招商（空置率 **{vac_rate:.2f}%**）"}},
+            {"tag": "img", "img_key": image_key,
+             "alt": {"tag": "plain_text", "content": "各项目档口状态堆叠柱形图"},
+             "mode": "fit_horizontal", "preview": True},
             {"tag": "hr"},
-            {"tag": "div", "text": {"tag": "lark_md", "content": detail_text.replace('\n', '  \n')}}
+            {"tag": "div", "text": {"tag": "lark_md", "content":
+                f"待招商项目 **{vac_projects_count}** 个　待招商数量 **{total_vacs}** 　空置率 **{vac_rate:.2f}%**"}},
+            {"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": detail_text}},
+            {"tag": "hr"},
+            {"tag": "note", "elements": [
+                {"tag": "plain_text", "content": "数据来源：综合运营管理 Base · 每周五 17:00 自动推送"}]}
         ]
     }
     payload = {
-        "receive_id": CHAT_ID,
-        "msg_type": "interactive",
-        "content": json.dumps(card, ensure_ascii=False)
+        'receive_id': CHAT_ID,
+        'msg_type': 'interactive',
+        'content': json.dumps(card, ensure_ascii=False)
     }
-    api_call('POST', '/im/v1/messages?receive_id_type=chat_id', token, json_data=payload)
-    _log("卡片发送成功！")
+    result = api_call('POST', '/im/v1/messages?receive_id_type=chat_id', token, json_data=payload)
+    msg_id = result.get('message_id', '')
+    print(f"  消息已发送: {msg_id}")
+    return msg_id
 
 
 # ========== Step 7: 归档到多维表格 ==========
-def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text, image_key):
-    _log("归档到「档口」招商周报表...")
-    now = datetime.now()
-    title = f"档口招商周报{now.strftime('%Y.%m.%d')}"
-    push_date = now.strftime('%Y-%m-%d %H:%M')
+def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text):
+    print('\n[Step 7] 归档到多维表格...')
+    today = datetime.now().strftime('%Y.%m.%d')
+    title = f"档口招商周报{today}"
+    # 飞书日期时间类型：传 Unix 时间戳（秒）
+    push_ts = int(time.time())
 
-    fields = {
-        "标题": title,
-        "推送日期": push_date,
-        "待招商": total_vacs,
-        "空置率(%)": vac_rate / 100,  # 小数形式（飞书百分比字段→显示%）
-        "待招商项目数": vac_projects_count,
-        "招商情况": detail_text
-    }
-
+    records_data = [{
+        'fields': {
+            '标题': title,
+            '推送日期': push_ts,
+            '待招商': total_vacs,
+            '空置率(%)': round(vac_rate / 100, 4),   # 小数 → 飞书百分比字段
+            '待招商项目数': vac_projects_count,
+            '招商情况': detail_text
+        }
+    }]
     result = api_call('POST',
-                      f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/batch_create',
-                      token,
-                      json_data={"records": [{"fields": fields}]})
-    records_list = result.get('records', [])
-    if not records_list:
-        raise RuntimeError("归档写入失败：无返回记录")
-    record_id = records_list[0].get('record_id')
-    _log(f"记录已创建: {record_id}")
-
-    # 上传柱形图附件
-    _log("上传柱形图附件...")
-    with open('chart_tmp.png', 'rb') as f:
-        img_bytes = f.read()
-    # 附件上传需两步：1)上传文件 2)绑定到字段
-    up_result = api_call('POST',
-                         f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/{record_id}/attachments',
-                         token,
-                         files={'file': ('chart.png', img_bytes, 'image/png')},
-                         data={'field_id': CHART_FIELD_ID})
-    _log("附件上传成功")
+                       f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/batch_create',
+                       token, json_data={'records': records_data})
+    record_id = result.get('records', [{}])[0].get('record_id', '')
+    print(f"  归档记录已创建: {record_id}")
     return record_id
+
+
+# ========== Step 8: 上传柱形图附件 ==========
+def upload_chart_attachment(token, record_id, png_bytes):
+    print('\n[Step 8] 上传柱形图到归档记录...')
+    files = {
+        'file': ('chart.png', io.BytesIO(png_bytes), 'image/png')
+    }
+    data = {'field_id': CHART_FIELD_ID}
+    result = api_call('POST',
+                       f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/{record_id}/attachments',
+                       token, data=data, files=files)
+    attach_id = result.get('attachment_id', '')
+    print(f"  附件已上传: {attach_id}")
+    return attach_id
 
 
 # ========== 主流程 ==========
 def main():
-    _log("===== 档口招商周报 =====", "[START]")
-
+    print('=== 档口招商周报（纯 HTTP 版）===\n')
     token = get_tenant_token()
 
     records = fetch_records(token)
-
-    projects = parse_and_stats(records)
-    vac_projects = [(k, v) for k, v in projects.items() if v['vacs'] > 0]
-    vac_projects.sort(key=lambda x: x[1]['vacs'], reverse=True)
-
-    total_all = sum(v['ops'] + v['vacs'] for _, v in vac_projects)
-    total_vacs = sum(v['vacs'] for _, v in vac_projects)
-    vac_rate = total_vacs / total_all * 100 if total_all else 0
+    projects, vac_projects, total_vacs, total_all, vac_rate = parse_and_stats(records)
     vac_projects_count = len(vac_projects)
 
-    _log(f"统计: {vac_projects_count}个项目, {total_vacs}/{total_all}待招商, 空置率{vac_rate:.2f}%")
-
-    gen_chart(vac_projects)
-    image_key = upload_image(token)
-    detail_text = build_detail_text(vac_projects)
-
+    png_bytes = generate_chart(vac_projects)
+    image_key = upload_image(token, png_bytes)
+    detail_text = build_detail_text(projects, vac_projects)
     send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail_text)
-    archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text, image_key)
+    record_id = archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text)
+    upload_chart_attachment(token, record_id, png_bytes)
 
-    # 清理
-    if os.path.exists('chart_tmp.png'):
-        os.remove('chart_tmp.png')
-
-    _log("===== 完成 =====", "[DONE]")
+    print('\n=== 全部完成 ===\n')
 
 
 if __name__ == '__main__':
+    for key in ['FEISHU_APP_ID', 'FEISHU_APP_SECRET']:
+        if key not in os.environ:
+            print(f"错误：环境变量 {key} 未设置")
+            sys.exit(1)
     main()
