@@ -11,7 +11,7 @@
 依赖: pip install requests
 """
 
-import os, json, sys, time
+import os, json, sys, time, io
 from datetime import datetime, timedelta
 
 try:
@@ -19,6 +19,13 @@ try:
 except ImportError:
     print("请先安装依赖: pip install requests")
     sys.exit(1)
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("[WARN] Pillow 未安装，封面图片功能不可用")
 
 # ========== 配置 ==========
 APP_ID = os.environ['FEISHU_APP_ID']
@@ -753,10 +760,10 @@ def build_analysis_text(stats, project_costs, supplier_stats, data_completeness,
     """构建重点分析和预警文本"""
     lines = []
 
-    # 1. 采购数量TOP5（板块一，展示快驴参与价和项目价格）
+    # 1. 采购数量TOP5（板块一，展示所有项目对比和项目价格）
     sorted_by_qty = sorted(stats, key=lambda x: x['total_qty'], reverse=True)
     lines.append("📦 采购数量TOP5：")
-    lines.append("  说明：按本周采购数量排序，标注快驴平台参考价（学校不允许平台采购，仅作价格对比）")
+    lines.append("  说明：按本周采购数量排序，展示所有项目价格对比及非平台项目价格对比")
     lines.append("")
 
     for i, s in enumerate(sorted_by_qty[:5], 1):
@@ -769,25 +776,22 @@ def build_analysis_text(stats, project_costs, supplier_stats, data_completeness,
         alert_tag = "⚠️" if s['alert_level'] == 'high' else "✅"
         lines.append(f"{i}. {veg}：{qty:.0f}斤 ¥{amount:.2f}（均价¥{avg:.2f}/斤）{alert_tag} 价差{s['diff_pct']:.1f}%")
 
-        # 从 veg_data 中提取该食材的快驴项目价格和非平台项目价格
+        # 从 veg_data 中提取该食材的所有项目价格和非平台项目价格
         if veg in veg_data:
             projects = veg_data[veg]
 
-            # 快驴项目价格
-            kuailu_prices = []
+            # 所有项目价格（含快驴）
+            all_prices = []
             for proj, data in projects.items():
-                if proj in KUAILU_PROJECTS and data['prices']:
+                if data['prices']:
                     avg_p = sum(data['prices']) / len(data['prices'])
-                    kuailu_prices.append((proj, avg_p))
+                    all_prices.append((proj, avg_p))
 
-            if kuailu_prices:
-                kuailu_prices.sort(key=lambda x: x[1])
-                kuailu_min = kuailu_prices[0]
-                kuailu_max = kuailu_prices[-1]
-                if len(kuailu_prices) == 1:
-                    lines.append(f"   快驴参与：{kuailu_min[0]} ¥{kuailu_min[1]:.2f}/斤")
-                else:
-                    lines.append(f"   快驴参与：最低价 {kuailu_min[0]} ¥{kuailu_min[1]:.2f}/斤 | 最高价 {kuailu_max[0]} ¥{kuailu_max[1]:.2f}/斤")
+            if all_prices:
+                all_prices.sort(key=lambda x: x[1])
+                all_min = all_prices[0]
+                all_max = all_prices[-1]
+                lines.append(f"   所有项目：最低价 {all_min[0]} ¥{all_min[1]:.2f}/斤 | 最高价 {all_max[0]} ¥{all_max[1]:.2f}/斤")
 
             # 非平台项目价格（不含快驴项目）
             non_kuailu_prices = []
@@ -985,9 +989,90 @@ def send_card(token, stats, project_costs, analysis_text):
     return msg_id
 
 
-# ========== Step 5: 归档到多维表格 ==========
-def archive_record(token, stats, project_costs, analysis_text):
-    print('\n[Step 5] 归档到多维表格...')
+# ========== Step 5: 生成封面图片 ==========
+def generate_cover_image(date_str):
+    """生成周报封面图片，用于表格画册视图"""
+    if not PIL_AVAILABLE:
+        print("  [WARN] Pillow 未安装，跳过封面生成")
+        return None
+
+    print(f'\n[Step 5] 生成封面图片...')
+    width, height = 1280, 720
+
+    # 创建渐变背景
+    img = Image.new('RGB', (width, height), '#1a5c3a')
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(26 + (76 - 26) * ratio)
+        g = int(92 + (175 - 92) * ratio)
+        b = int(58 + (80 - 58) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+    # 加载字体
+    try:
+        font_large = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 72)
+        font_medium = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 36)
+        font_small = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 24)
+    except:
+        try:
+            font_large = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 72)
+            font_medium = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 36)
+            font_small = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", 24)
+        except:
+            font_large = ImageFont.load_default()
+            font_medium = font_large
+            font_small = font_large
+
+    # 左侧装饰竖线
+    draw.rectangle([(80, 120), (90, 600)], fill='#4ade80')
+    for i in range(5):
+        y = 180 + i * 100
+        draw.ellipse([(70, y-5), (100, y+5)], fill='#4ade80')
+
+    # 主标题
+    title = "青菜价格周报"
+    bbox = draw.textbbox((0, 0), title, font=font_large)
+    title_w = bbox[2] - bbox[0]
+    title_x = (width - title_w) // 2
+    draw.text((title_x, 200), title, fill='white', font=font_large)
+
+    # 日期
+    bbox = draw.textbbox((0, 0), date_str, font=font_medium)
+    sub_w = bbox[2] - bbox[0]
+    sub_x = (width - sub_w) // 2
+    draw.text((sub_x, 320), date_str, fill='#bbf7d0', font=font_medium)
+
+    # 分隔线
+    draw.line([(400, 400), (880, 400)], fill='#4ade80', width=2)
+
+    # 底部说明
+    desc = "综合运营管理 · 青菜采购数据分析"
+    bbox = draw.textbbox((0, 0), desc, font=font_small)
+    desc_w = bbox[2] - bbox[0]
+    desc_x = (width - desc_w) // 2
+    draw.text((desc_x, 440), desc, fill='#86efac', font=font_small)
+
+    # 右下角装饰
+    cx, cy = 1100, 580
+    colors = ['#22c55e', '#16a34a', '#15803d', '#4ade80']
+    positions = [(cx, cy), (cx+40, cy-20), (cx-30, cy-30), (cx+20, cy+30)]
+    for (x, y), color in zip(positions, colors):
+        draw.ellipse([(x-25, y-25), (x+25, y+25)], fill=color)
+
+    # 保存到内存
+    buf = io.BytesIO()
+    img.save(buf, format='PNG', quality=95)
+    buf.seek(0)
+    png_bytes = buf.getvalue()
+    print(f"  封面图片已生成 ({len(png_bytes)} bytes)")
+    return png_bytes
+
+
+# ========== Step 6: 归档到多维表格 ==========
+def archive_record(token, stats, project_costs, analysis_text, cover_bytes=None):
+    print('\n[Step 6] 归档到多维表格...')
     today = datetime.now().strftime('%Y.%m.%d')
     title = f"青菜价格周报{today}"
     push_ts = int(time.time() * 1000)
@@ -997,18 +1082,42 @@ def archive_record(token, stats, project_costs, analysis_text):
     alert_count = len([s for s in stats if s['alert_level'] == 'high'])
     project_count = len(project_costs)
 
-    records_data = [{
-        'fields': {
-            '标题': title,
-            '类别': '每周',
-            '推送时间': push_ts,
-            '采购总量': total_qty,
-            '采购总金额': round(total_amount, 2),
-            '异常食材数': alert_count,
-            '涉及项目数': project_count,
-            '重点关注': analysis_text,
+    # 上传封面图片
+    file_token = None
+    if cover_bytes:
+        print('  [Step 6.1] 上传封面图片...')
+        files = {
+            'file': ('cover.png', io.BytesIO(cover_bytes), 'image/png')
         }
-    }]
+        data = {
+            'file_name': 'cover.png',
+            'parent_type': 'bitable',
+            'parent_node': BASE_TOKEN,
+            'size': str(len(cover_bytes))
+        }
+        try:
+            upload_result = api_call('POST', '/drive/v1/medias/upload_all', token, data=data, files=files)
+            file_token = upload_result.get('file_token', '')
+            print(f"  file_token: {file_token}")
+        except Exception as e:
+            print(f"  [WARN] 封面上传失败: {e}")
+
+    fields = {
+        '标题': title,
+        '类别': '每周',
+        '推送时间': push_ts,
+        '采购总量': total_qty,
+        '采购总金额': round(total_amount, 2),
+        '异常食材数': alert_count,
+        '涉及项目数': project_count,
+        '重点关注': analysis_text,
+    }
+
+    # 如果有封面，添加到附件字段
+    if file_token:
+        fields['分析图表'] = [{'file_token': file_token}]
+
+    records_data = [{'fields': fields}]
 
     result = api_call('POST',
                        f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/batch_create',
@@ -1037,9 +1146,13 @@ def main():
     # 计算供应商统计
     supplier_stats = _calculate_supplier_stats(veg_data)
 
+    # 生成封面图片
+    today = datetime.now().strftime('%Y.%m.%d')
+    cover_bytes = generate_cover_image(today)
+
     analysis_text = build_analysis_text(stats, project_costs, supplier_stats, data_completeness, veg_data)
     send_card(token, stats, project_costs, analysis_text)
-    archive_record(token, stats, project_costs, analysis_text)
+    archive_record(token, stats, project_costs, analysis_text, cover_bytes)
 
     print('\n=== 全部完成 ===\n')
 
