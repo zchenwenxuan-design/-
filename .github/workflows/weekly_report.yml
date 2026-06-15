@@ -24,7 +24,7 @@ jobs:
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID || 'oc_214e828c8acf75a362ca87df4e96eb2e' }}
         run: python dangkou-upload/weekly_push_http.py
 
-  # 青菜价格异常预警周报
+  # 青菜价格周报
   vegetable-report:
     needs: stall-report
     runs-on: ubuntu-latest
@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install requests Pillow
+        run: pip install requests
       - name: Run vegetable report
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
