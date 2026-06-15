@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-青菜价格异常预警周报 — 纯 HTTP 版
+青菜价格周报 — 纯 HTTP 版
 适用于：GitHub Actions / 任意 Python 3.8+ 环境
 
 环境变量（必须）:
@@ -11,7 +11,7 @@
 依赖: pip install requests
 """
 
-import os, json, sys, time, io
+import os, json, sys, time
 from datetime import datetime, timedelta
 
 try:
@@ -32,8 +32,20 @@ TABLE_SUPPLIER = 'tblgGb0oFtei8uAx'  # 供应商表
 
 API_BASE = 'https://open.feishu.cn/open-apis'
 
-# 预警阈值
-ALERT_THRESHOLD = 0.15  # 15%
+# 预警阈值（按食材类型区分）
+# 调味类价格波动大，阈值放宽；大宗蔬菜价格稳定，阈值收紧
+ALERT_THRESHOLD = 0.15  # 默认 15%
+ALERT_THRESHOLD_HIGH = 0.30  # 调味类：蒜、姜、葱、辣椒等 30%
+ALERT_THRESHOLD_LOW = 0.10   # 大宗蔬菜：土豆、白菜、包菜等 10%
+
+# 食材分类映射
+VEG_CATEGORY_HIGH = {'蒜', '姜', '葱', '蒜苗', '蒜苔', '大葱', '小葱', '洋葱', '沙姜',
+                     '辣椒', '小米椒', '线椒', '红椒', '青椒', '圆椒', '彩椒', '花椒',
+                     '香菜', '芹菜', '韭菜', '韭黄', '韭菜花'}
+VEG_CATEGORY_LOW = {'土豆', '白菜', '包菜', '小白菜', '奶白菜', '娃娃菜', '生菜', '西生菜',
+                    '油麦菜', '上海青', '菜心', '芥菜', '春菜', '番薯叶', '枸杞叶', '紫苏',
+                    '南瓜', '冬瓜', '苦瓜', '黄瓜', '丝瓜', '蒲瓜', '葫芦瓜', '节瓜', '白瓜',
+                    '白萝卜', '胡萝卜', '红薯', '紫薯', '芋头', '山药', '莲藕', '土豆'}  # 大宗稳定
 
 # 食材 option_id → 中文名称 映射（来自「产品-基础信息」表的 🚩统一食材名称 单选字段）
 VEG_OPTION_MAP = {
@@ -399,11 +411,19 @@ def _calculate_stats(veg_data):
         price_diff = max_price['avg_price'] - min_price['avg_price'] if max_price and min_price else 0
         diff_pct = (price_diff / week_avg * 100) if week_avg > 0 else 0
         
-        # 判断是否需要预警（价差超过15%）
+        # 动态阈值：根据食材类型调整
+        if veg_name in VEG_CATEGORY_HIGH:
+            threshold = ALERT_THRESHOLD_HIGH * 100  # 30%
+        elif veg_name in VEG_CATEGORY_LOW:
+            threshold = ALERT_THRESHOLD_LOW * 100   # 10%
+        else:
+            threshold = ALERT_THRESHOLD * 100        # 15%
+        
+        # 判断是否需要预警
         alert_level = 'normal'
-        if diff_pct >= 15:
+        if diff_pct >= threshold:
             alert_level = 'high'
-        elif diff_pct >= 10:
+        elif diff_pct >= threshold * 0.7:
             alert_level = 'medium'
         
         stats.append({
@@ -482,7 +502,15 @@ def _calculate_project_costs(veg_data, this_week_records, last_week_records):
             if project not in project_costs:
                 continue
             avg_price = sum(data['prices']) / len(data['prices']) if data['prices'] else 0
-            if week_avg > 0 and (avg_price - week_avg) / week_avg >= ALERT_THRESHOLD:
+            # 动态阈值
+            if veg_name in VEG_CATEGORY_HIGH:
+                threshold = ALERT_THRESHOLD_HIGH
+            elif veg_name in VEG_CATEGORY_LOW:
+                threshold = ALERT_THRESHOLD_LOW
+            else:
+                threshold = ALERT_THRESHOLD
+            
+            if week_avg > 0 and (avg_price - week_avg) / week_avg >= threshold:
                 project_costs[project]['alert_count'] += 1
                 project_costs[project]['alert_vegs'].append(veg_name)
     
@@ -659,240 +687,8 @@ def _calculate_potential_savings(records):
     return total_savings
 
 
-# ========== Step 3: 生成分析图表 ==========
-def generate_chart(stats, project_costs):
-    """生成四合一数据分析看板（2x2布局 + 数据标签）"""
-    print('\n[Step 3] 生成分析图表...')
-    import urllib.parse
-    from PIL import Image, ImageDraw, ImageFont
-    import math
-
-    # ========== 图1: TOP10食材单价对比 ==========
-    top10 = stats[:10]
-    labels1 = [s['veg_name'] for s in top10]
-    max_p = [s['max_price']['avg_price'] if s['max_price'] else 0 for s in top10]
-    avg_p = [s['week_avg'] for s in top10]
-    min_p = [s['min_price']['avg_price'] if s['min_price'] else 0 for s in top10]
-
-    chart1 = {
-        'type': 'bar',
-        'data': {
-            'labels': labels1,
-            'datasets': [
-                {'label': '最高', 'data': max_p, 'backgroundColor': '#EF4444'},
-                {'label': '均价', 'data': avg_p, 'backgroundColor': '#F59E0B'},
-                {'label': '最低', 'data': min_p, 'backgroundColor': '#10B981'}
-            ]
-        },
-        'options': {
-            'title': {'display': True, 'text': 'TOP10食材单价对比（元/斤）', 'fontSize': 13, 'fontColor': '#333'},
-            'scales': {
-                'yAxes': [{'ticks': {'beginAtZero': True, 'fontColor': '#666', 'stepSize': 2}, 'gridLines': {'color': 'rgba(0,0,0,0.05)'}}],
-                'xAxes': [{'ticks': {'fontColor': '#333', 'fontSize': 10}, 'gridLines': {'display': False}}]
-            },
-            'legend': {'position': 'bottom', 'labels': {'fontColor': '#333', 'fontSize': 9, 'padding': 8}}
-        }
-    }
-    url1 = 'https://quickchart.io/chart?w=520&h=340&bkg=white&c=' + urllib.parse.quote(json.dumps(chart1, separators=(',', ':')))
-    img1_bytes = requests.get(url1, timeout=30).content
-    img1 = Image.open(io.BytesIO(img1_bytes))
-
-    # ========== 图2: 采购数量TOP5 ==========
-    sorted_by_qty = sorted(stats, key=lambda x: x['total_qty'], reverse=True)
-    top5_qty = sorted_by_qty[:5]
-    labels2 = [s['veg_name'] for s in top5_qty]
-    qty2 = [s['total_qty'] for s in top5_qty]
-    colors2 = ['#EF4444', '#F59E0B', '#3B82F6', '#8B5CF6', '#10B981']
-
-    chart2 = {
-        'type': 'bar',
-        'data': {
-            'labels': labels2,
-            'datasets': [{'data': qty2, 'backgroundColor': colors2}]
-        },
-        'options': {
-            'title': {'display': True, 'text': '本周采购数量TOP5（斤）', 'fontSize': 13, 'fontColor': '#333'},
-            'scales': {
-                'yAxes': [{'ticks': {'beginAtZero': True, 'fontColor': '#666'}, 'gridLines': {'color': 'rgba(0,0,0,0.05)'}}],
-                'xAxes': [{'ticks': {'fontColor': '#333'}, 'gridLines': {'display': False}}]
-            },
-            'legend': {'display': False}
-        }
-    }
-    url2 = 'https://quickchart.io/chart?w=520&h=340&bkg=white&c=' + urllib.parse.quote(json.dumps(chart2, separators=(',', ':')))
-    img2_bytes = requests.get(url2, timeout=30).content
-    img2 = Image.open(io.BytesIO(img2_bytes))
-
-    # ========== 图3: 项目采购金额占比饼图 ==========
-    sorted_projects = sorted(project_costs, key=lambda x: x['this_week_amount'], reverse=True)
-    labels3 = [p['project'] for p in sorted_projects]
-    amt3 = [p['this_week_amount'] for p in sorted_projects]
-    colors3 = ['#4472C4', '#70AD47', '#FFC000', '#ED7D31', '#9E480E', '#5B9BD5', '#A5A5A5', '#7030A0', '#C55A11', '#2F5597']
-
-    chart3 = {
-        'type': 'pie',
-        'data': {'labels': labels3, 'datasets': [{'data': amt3, 'backgroundColor': colors3[:len(amt3)], 'borderColor': '#fff', 'borderWidth': 2}]},
-        'options': {
-            'title': {'display': True, 'text': '各项目采购金额占比', 'fontSize': 13, 'fontColor': '#333'},
-            'legend': {'position': 'right', 'labels': {'fontColor': '#333', 'fontSize': 9, 'padding': 6}}
-        }
-    }
-    url3 = 'https://quickchart.io/chart?w=520&h=340&bkg=white&c=' + urllib.parse.quote(json.dumps(chart3, separators=(',', ':')))
-    img3_bytes = requests.get(url3, timeout=30).content
-    img3 = Image.open(io.BytesIO(img3_bytes))
-
-    # ========== 图4: 重点关注食材价差对比 ==========
-    alerts = [s for s in stats if s['alert_level'] == 'high'][:5]
-    if not alerts:
-        alerts = stats[:5]
-    labels4 = [s['veg_name'] for s in alerts]
-    max4 = [s['max_price']['avg_price'] if s['max_price'] else 0 for s in alerts]
-    min4 = [s['min_price']['avg_price'] if s['min_price'] else 0 for s in alerts]
-
-    chart4 = {
-        'type': 'bar',
-        'data': {
-            'labels': labels4,
-            'datasets': [
-                {'label': '最高', 'data': max4, 'backgroundColor': '#EF4444'},
-                {'label': '最低', 'data': min4, 'backgroundColor': '#10B981'}
-            ]
-        },
-        'options': {
-            'title': {'display': True, 'text': '重点关注食材价差对比（元/斤）', 'fontSize': 13, 'fontColor': '#333'},
-            'scales': {
-                'yAxes': [{'ticks': {'beginAtZero': True, 'fontColor': '#666'}, 'gridLines': {'color': 'rgba(0,0,0,0.05)'}}],
-                'xAxes': [{'ticks': {'fontColor': '#333'}, 'gridLines': {'display': False}}]
-            },
-            'legend': {'position': 'bottom', 'labels': {'fontColor': '#333', 'fontSize': 9, 'padding': 8}}
-        }
-    }
-    url4 = 'https://quickchart.io/chart?w=520&h=340&bkg=white&c=' + urllib.parse.quote(json.dumps(chart4, separators=(',', ':')))
-    img4_bytes = requests.get(url4, timeout=30).content
-    img4 = Image.open(io.BytesIO(img4_bytes))
-
-    # ========== 合并为 2x2 大图 + 添加数据标签 ==========
-    w, h = 520, 340
-    title_h = 55
-    pad = 12
-    total_w = w * 2 + pad * 3
-    total_h = h * 2 + pad * 3 + title_h
-
-    merged = Image.new('RGB', (total_w, total_h), '#FFFFFF')
-    draw = ImageDraw.Draw(merged)
-
-    # 加载字体
-    try:
-        font_title = ImageFont.truetype("C:/Windows/Fonts/msyhbd.ttc", 22)
-        font_label = ImageFont.truetype("C:/Windows/Fonts/msyhbd.ttc", 9)
-        font_small = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 8)
-        font_pct = ImageFont.truetype("C:/Windows/Fonts/msyhbd.ttc", 10)
-    except:
-        font_title = font_label = font_small = font_pct = ImageFont.load_default()
-
-    # 标题
-    draw.text((total_w // 2, 18), "青菜价格异常预警周报 - 数据分析看板", fill='#1a1a1a', font=font_title, anchor='mt')
-
-    # 放置四张图
-    pos1 = (pad, title_h + pad)
-    pos2 = (w + pad * 2, title_h + pad)
-    pos3 = (pad, title_h + h + pad * 2)
-    pos4 = (w + pad * 2, title_h + h + pad * 2)
-    merged.paste(img1, pos1)
-    merged.paste(img2, pos2)
-    merged.paste(img3, pos3)
-    merged.paste(img4, pos4)
-
-    # --- 图1 数据标签 ---
-    y_max1 = max(max(max_p), 1)
-    y_scale1 = 14 if y_max1 <= 14 else (y_max1 * 1.15)
-    cx1, cy1 = pos1
-    bar_w, group_w = 11, 42
-    sx1 = cx1 + 52
-    by1 = cy1 + 278
-    yr1 = 240
-    for i, (mx, av, mn) in enumerate(zip(max_p, avg_p, min_p)):
-        gx = sx1 + i * group_w
-        draw.text((gx + 2, by1 - (mx / y_scale1) * yr1 - 3), f'{mx:.1f}', fill='#333', font=font_label, anchor='mb')
-        draw.text((gx + bar_w + 3, by1 - (av / y_scale1) * yr1 - 3), f'{av:.1f}', fill='#B45309', font=font_small, anchor='mb')
-        draw.text((gx + bar_w * 2 + 5, by1 - (mn / y_scale1) * yr1 - 3), f'{mn:.1f}', fill='#059669', font=font_small, anchor='mb')
-
-    # --- 图2 数据标签 ---
-    y_max2 = max(max(qty2), 1)
-    y_scale2 = y_max2 * 1.15
-    cx2, cy2 = pos2
-    sx2 = cx2 + 58
-    gw2 = 82
-    by2 = cy2 + 278
-    yr2 = 240
-    for i, q in enumerate(qty2):
-        gx = sx2 + i * gw2 + 30
-        draw.text((gx, by2 - (q / y_scale2) * yr2 - 5), f'{q:.0f}斤', fill='#333', font=font_label, anchor='mb')
-
-    # --- 图3 饼图百分比标签 ---
-    cx3, cy3 = pos3
-    pcx, pcy = cx3 + 155, cy3 + 170
-    pr = 100
-    total_amt = sum(amt3)
-    angle = -90
-    for amt_val, col in zip(amt3, colors3[:len(amt3)]):
-        pct = amt_val / total_amt if total_amt > 0 else 0
-        sweep = pct * 360
-        ma = angle + sweep / 2
-        rad = math.radians(ma)
-        lx = pcx + pr * 0.6 * math.cos(rad)
-        ly = pcy + pr * 0.6 * math.sin(rad)
-        txt = f'{pct * 100:.1f}%'
-        bbox = draw.textbbox((0, 0), txt, font=font_pct)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.rectangle([lx - tw / 2 - 2, ly - th / 2 - 1, lx + tw / 2 + 2, ly + th / 2 + 1], fill=col)
-        draw.text((lx, ly), txt, fill='#FFFFFF', font=font_pct, anchor='mm')
-        angle += sweep
-
-    # --- 图4 数据标签 + 价差 ---
-    y_max4 = max(max(max4), 1)
-    y_scale4 = 14 if y_max4 <= 14 else (y_max4 * 1.15)
-    cx4, cy4 = pos4
-    sx4 = cx4 + 65
-    gw4 = 82
-    by4 = cy4 + 278
-    yr4 = 240
-    for i, (mx, mn) in enumerate(zip(max4, min4)):
-        gx = sx4 + i * gw4 + 22
-        hy = by4 - (mx / y_scale4) * yr4 - 3
-        ly = by4 - (mn / y_scale4) * yr4 - 3
-        draw.text((gx, hy), f'{mx:.1f}', fill='#333', font=font_label, anchor='mb')
-        draw.text((gx + 30, ly), f'{mn:.1f}', fill='#059669', font=font_small, anchor='mb')
-        diff = ((mx - mn) / mn * 100) if mn > 0 else 0
-        draw.text((gx + 15, (hy + ly) / 2 - 5), f'价差{diff:.0f}%', fill='#DC2626', font=font_small, anchor='mm')
-
-    # 分隔线
-    draw.line([(total_w // 2, title_h), (total_w // 2, total_h)], fill='#E5E5E5', width=1)
-    draw.line([(0, title_h + h + pad), (total_w, title_h + h + pad)], fill='#E5E5E5', width=1)
-
-    # 输出为 PNG bytes
-    buf = io.BytesIO()
-    merged.save(buf, format='PNG', quality=95)
-    png_bytes = buf.getvalue()
-    print(f"  看板大小: {len(png_bytes) // 1024} KB")
-    return png_bytes
-
-
-# ========== Step 4: 上传图片到飞书 IM ==========
-def upload_image(token, png_bytes):
-    print('\n[Step 4] 上传图片到飞书 IM...')
-    files = {
-        'image': ('chart.png', io.BytesIO(png_bytes), 'image/png')
-    }
-    data = {'image_type': 'message'}
-    result = api_call('POST', '/im/v1/images', token, data=data, files=files)
-    image_key = result.get('image_key', '')
-    print(f"  image_key: {image_key}")
-    return image_key
-
-
-# ========== Step 5: 构建分析文本 ==========
-def build_analysis_text(stats, project_costs, supplier_stats, potential_savings, data_completeness):
+# ========== Step 3: 构建分析文本 ==========
+def build_analysis_text(stats, project_costs, supplier_stats, data_completeness):
     """构建重点分析和预警文本"""
     lines = []
     
@@ -1001,61 +797,38 @@ def build_analysis_text(stats, project_costs, supplier_stats, potential_savings,
             lines.append(f"  {status} {project}：已填报 {days} 天")
         lines.append("")
     
-    # 7. 潜在节省金额（按本月最低价采购）
-    if potential_savings > 0:
-        lines.append(f"💸 潜在节省：如果全部按本月最低价采购，本周可节省 ¥{potential_savings:.2f}")
-        lines.append(f"   月度预估节省：¥{potential_savings * 4:.2f}")
-        lines.append("")
-    
-    # 8. 建议行动
-    lines.append("📋 建议行动：")
-    if alerts_in_top10:
-        top_alert = alerts_in_top10[0]
-        lines.append(f"1. 约谈 {top_alert['max_price']['project']}，{top_alert['veg_name']}采购{top_alert['total_qty']:.0f}斤价格超标{top_alert['diff_pct']:.1f}%")
-    if supplier_stats:
-        worst_supplier = min(supplier_stats.items(), key=lambda x: x[1]['score'])
-        lines.append(f"2. 重点关注 {worst_supplier[0]}（评分{worst_supplier[1]['score']}），异常率{worst_supplier[1]['alert_rate']*100:.0f}%")
-        best_supplier = max(supplier_stats.items(), key=lambda x: x[1]['score'])
-        lines.append(f"3. 推广 {best_supplier[0]} 经验（评分{best_supplier[1]['score']}），可作为标杆供应商")
-    if not alerts_in_top10:
-        lines.append("1. 本周采购量大的食材价格稳定，继续保持现有供应商合作")
-    
     return '\n'.join(lines)
 
 
-# ========== Step 6: 发送卡片 ==========
-def send_card(token, image_key, stats, project_costs, analysis_text):
-    print('\n[Step 5] 发送卡片到群...')
+# ========== Step 4: 发送卡片 ==========
+def send_card(token, stats, project_costs, analysis_text):
+    print('\n[Step 4] 发送卡片到群...')
     today = datetime.now().strftime('%Y.%m.%d')
-    
+
     # 计算本周总览
     total_amount = sum(s['total_amount'] for s in stats)
     total_qty = sum(s['total_qty'] for s in stats)
     alert_count = len([s for s in stats if s['alert_level'] == 'high'])
     veg_count = len(stats)
     project_count = len(project_costs)
-    
+
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": f"🥬 青菜价格异常预警周报 · {today}"},
+            "title": {"tag": "plain_text", "content": f"🥬 青菜价格周报 · {today}"},
             "template": "green"
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content":
                 f"**本周概况**：{project_count}个项目采购 **{veg_count}** 种食材　总量 **{total_qty:.0f}** 斤　金额 **¥{total_amount:.2f}**　🔴 异常 **{alert_count}** 种"}},
             {"tag": "hr"},
-            {"tag": "img", "img_key": image_key,
-             "alt": {"tag": "plain_text", "content": "食材跨项目单价对比图"},
-             "mode": "fit_horizontal", "preview": True},
-            {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": analysis_text}},
             {"tag": "hr"},
             {"tag": "note", "elements": [
-                {"tag": "plain_text", "content": "数据来源：综合运营管理 Base · 每周五 17:00 自动推送 · 均价为近7日均价 · 预警阈值15%"}]}
+                {"tag": "plain_text", "content": "数据来源：综合运营管理 Base · 每周五 17:00 自动推送 · 均价为近7日均价 · 预警阈值按食材类型动态调整"}]}
         ]
     }
-    
+
     payload = {
         'receive_id': CHAT_ID,
         'msg_type': 'interactive',
@@ -1067,33 +840,18 @@ def send_card(token, image_key, stats, project_costs, analysis_text):
     return msg_id
 
 
-# ========== Step 7: 归档到多维表格 ==========
-def archive_record(token, stats, project_costs, analysis_text, png_bytes):
-    print('\n[Step 6] 归档到多维表格...')
+# ========== Step 5: 归档到多维表格 ==========
+def archive_record(token, stats, project_costs, analysis_text):
+    print('\n[Step 5] 归档到多维表格...')
     today = datetime.now().strftime('%Y.%m.%d')
-    title = f"青菜价格预警周报{today}"
+    title = f"青菜价格周报{today}"
     push_ts = int(time.time() * 1000)
-    
+
     total_amount = sum(s['total_amount'] for s in stats)
     total_qty = sum(s['total_qty'] for s in stats)
     alert_count = len([s for s in stats if s['alert_level'] == 'high'])
     project_count = len(project_costs)
-    
-    # 上传素材获取 file_token
-    print('  [Step 6.1] 上传图表素材...')
-    files = {
-        'file': ('chart.png', io.BytesIO(png_bytes), 'image/png')
-    }
-    data = {
-        'file_name': 'chart.png',
-        'parent_type': 'bitable',
-        'parent_node': BASE_TOKEN,
-        'size': str(len(png_bytes))
-    }
-    upload_result = api_call('POST', '/drive/v1/medias/upload_all', token, data=data, files=files)
-    file_token = upload_result.get('file_token', '')
-    print(f"  file_token: {file_token}")
-    
+
     records_data = [{
         'fields': {
             '标题': title,
@@ -1104,10 +862,9 @@ def archive_record(token, stats, project_costs, analysis_text, png_bytes):
             '异常食材数': alert_count,
             '涉及项目数': project_count,
             '重点关注': analysis_text,
-            '分析图表': [{'file_token': file_token}] if file_token else []
         }
     }]
-    
+
     result = api_call('POST',
                        f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/batch_create',
                        token, json_data={'records': records_data})
@@ -1118,30 +875,27 @@ def archive_record(token, stats, project_costs, analysis_text, png_bytes):
 
 # ========== 主流程 ==========
 def main():
-    print('=== 青菜价格异常预警周报 ===\n')
+    print('=== 青菜价格周报 ===\n')
     token = get_tenant_token()
-    
+
     # 预加载供应商名称映射（link 字段只返回 record_id，需要解析）
     supplier_map = fetch_supplier_names(token)
-    
+
     this_week_records, last_week_records = fetch_records(token)
     stats, project_costs, veg_data, data_completeness = parse_and_stats(
         this_week_records, last_week_records, supplier_map)
-    
+
     if not stats:
         print("本周无青菜采购数据，跳过推送")
         return
-    
-    # 计算供应商统计和潜在节省
+
+    # 计算供应商统计
     supplier_stats = _calculate_supplier_stats(veg_data)
-    potential_savings = _calculate_potential_savings(this_week_records)
-    
-    png_bytes = generate_chart(stats, project_costs)
-    image_key = upload_image(token, png_bytes)
-    analysis_text = build_analysis_text(stats, project_costs, supplier_stats, potential_savings, data_completeness)
-    send_card(token, image_key, stats, project_costs, analysis_text)
-    archive_record(token, stats, project_costs, analysis_text, png_bytes)
-    
+
+    analysis_text = build_analysis_text(stats, project_costs, supplier_stats, data_completeness)
+    send_card(token, stats, project_costs, analysis_text)
+    archive_record(token, stats, project_costs, analysis_text)
+
     print('\n=== 全部完成 ===\n')
 
 
