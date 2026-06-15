@@ -174,6 +174,7 @@ def fetch_records(token):
     
     this_week_records = []
     last_week_records = []
+    this_week_dates = []  # 记录本周实际数据日期
     page_token = None
     
     while True:
@@ -208,6 +209,7 @@ def fetch_records(token):
                 # 分类到本周或上周
                 if this_week_start <= record_date <= today:
                     this_week_records.append(item)
+                    this_week_dates.append(record_date)
                 elif last_week_start <= record_date < this_week_start:
                     last_week_records.append(item)
         
@@ -218,7 +220,16 @@ def fetch_records(token):
     
     print(f"  本周共 {len(this_week_records)} 条记录")
     print(f"  上周共 {len(last_week_records)} 条记录")
-    return this_week_records, last_week_records
+    
+    # 计算本周实际数据日期范围
+    if this_week_dates:
+        actual_start = min(this_week_dates).strftime('%Y.%m.%d')
+        actual_end = max(this_week_dates).strftime('%Y.%m.%d')
+        print(f"  本周数据周期：{actual_start} ~ {actual_end}")
+    else:
+        actual_start = actual_end = ''
+    
+    return this_week_records, last_week_records, actual_start, actual_end
 
 
 # ========== Step 2: 解析数据并统计 ==========
@@ -749,14 +760,19 @@ def _calculate_potential_savings(records):
 
 
 # ========== Step 3: 构建分析文本 ==========
-def build_analysis_text(stats, project_costs, supplier_stats, data_completeness, veg_data):
+def build_analysis_text(stats, project_costs, supplier_stats, data_completeness, veg_data, actual_start, actual_end):
     """构建重点分析和预警文本"""
     lines = []
+
+    # 数据周期
+    if actual_start and actual_end:
+        lines.append(f"📅 数据周期：{actual_start} ~ {actual_end}")
+        lines.append("")
 
     # 1. 采购数量TOP5（板块一，展示快驴参与价和项目商家价）
     sorted_by_qty = sorted(stats, key=lambda x: x['total_qty'], reverse=True)
     lines.append("📦 采购数量TOP5：")
-    lines.append("  说明：按本周采购数量排序，快驴参与为平台采购对比，项目商家为非平台项目对比")
+    lines.append("  说明：按本周采购数量排序，快驴参与为全部项目对比，项目商家为非快驴项目对比")
     lines.append("")
 
     for i, s in enumerate(sorted_by_qty[:5], 1):
@@ -769,27 +785,27 @@ def build_analysis_text(stats, project_costs, supplier_stats, data_completeness,
         alert_tag = "⚠️" if s['alert_level'] == 'high' else "✅"
         lines.append(f"{i}. {veg}：{qty:.0f}斤 ¥{amount:.2f}（均价¥{avg:.2f}/斤）{alert_tag} 价差{s['diff_pct']:.1f}%")
 
-        # 从 veg_data 中提取该食材的快驴项目价格和非平台项目价格
+        # 从 veg_data 中提取该食材的全部项目价格和非快驴项目价格
         if veg in veg_data:
             projects = veg_data[veg]
 
-            # 快驴项目价格
-            kuailu_prices = []
+            # 快驴参与：全部项目之间的价格对比（含快驴+非快驴）
+            all_prices = []
             for proj, data in projects.items():
-                if proj in KUAILU_PROJECTS and data['prices']:
+                if data['prices']:
                     avg_p = sum(data['prices']) / len(data['prices'])
-                    kuailu_prices.append((proj, avg_p))
+                    all_prices.append((proj, avg_p))
 
-            if kuailu_prices:
-                kuailu_prices.sort(key=lambda x: x[1])
-                kuailu_min = kuailu_prices[0]
-                kuailu_max = kuailu_prices[-1]
-                if len(kuailu_prices) == 1:
-                    lines.append(f"   快驴参与：{kuailu_min[0]} ¥{kuailu_min[1]:.2f}/斤")
+            if all_prices:
+                all_prices.sort(key=lambda x: x[1])
+                all_min = all_prices[0]
+                all_max = all_prices[-1]
+                if len(all_prices) == 1:
+                    lines.append(f"   快驴参与：{all_min[0]} ¥{all_min[1]:.2f}/斤")
                 else:
-                    lines.append(f"   快驴参与：最低价 {kuailu_min[0]} ¥{kuailu_min[1]:.2f}/斤 | 最高价 {kuailu_max[0]} ¥{kuailu_max[1]:.2f}/斤")
+                    lines.append(f"   快驴参与：最低价 {all_min[0]} ¥{all_min[1]:.2f}/斤 | 最高价 {all_max[0]} ¥{all_max[1]:.2f}/斤")
 
-            # 非平台项目价格（不含快驴项目）
+            # 项目商家：剔除快驴后，仅非快驴项目之间的价格对比
             non_kuailu_prices = []
             for proj, data in projects.items():
                 if proj not in KUAILU_PROJECTS and data['prices']:
@@ -802,7 +818,7 @@ def build_analysis_text(stats, project_costs, supplier_stats, data_completeness,
                 non_max = non_kuailu_prices[-1]
                 lines.append(f"   项目商家：最低价 {non_min[0]} ¥{non_min[1]:.2f}/斤 | 最高价 {non_max[0]} ¥{non_max[1]:.2f}/斤")
             else:
-                lines.append(f"   项目商家：非平台项目本周无采购")
+                lines.append(f"   项目商家：非快驴项目本周无采购")
         lines.append("")
 
     # 2. 供应商评分（仅非平台供应商）
@@ -946,7 +962,7 @@ def build_analysis_text(stats, project_costs, supplier_stats, data_completeness,
 
 
 # ========== Step 4: 发送卡片 ==========
-def send_card(token, stats, project_costs, analysis_text):
+def send_card(token, stats, project_costs, analysis_text, actual_start, actual_end):
     print('\n[Step 4] 发送卡片到群...')
     today = datetime.now().strftime('%Y.%m.%d')
 
@@ -957,6 +973,11 @@ def send_card(token, stats, project_costs, analysis_text):
     veg_count = len(stats)
     project_count = len(project_costs)
 
+    # 数据周期
+    period_str = ""
+    if actual_start and actual_end:
+        period_str = f"　数据周期 {actual_start}~{actual_end}"
+
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -965,7 +986,7 @@ def send_card(token, stats, project_costs, analysis_text):
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content":
-                f"**本周概况**：{project_count}个项目采购 **{veg_count}** 种食材　总量 **{total_qty:.0f}** 斤　金额 **¥{total_amount:.2f}**　🔴 异常 **{alert_count}** 种"}},
+                f"**本周概况**：{project_count}个项目采购 **{veg_count}** 种食材　总量 **{total_qty:.0f}** 斤　金额 **¥{total_amount:.2f}**　🔴 异常 **{alert_count}** 种{period_str}"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": analysis_text}},
             {"tag": "hr"},
@@ -1026,7 +1047,7 @@ def main():
     # 预加载供应商名称映射（link 字段只返回 record_id，需要解析）
     supplier_map = fetch_supplier_names(token)
 
-    this_week_records, last_week_records = fetch_records(token)
+    this_week_records, last_week_records, actual_start, actual_end = fetch_records(token)
     stats, project_costs, veg_data, data_completeness = parse_and_stats(
         this_week_records, last_week_records, supplier_map)
 
@@ -1037,8 +1058,8 @@ def main():
     # 计算供应商统计
     supplier_stats = _calculate_supplier_stats(veg_data)
 
-    analysis_text = build_analysis_text(stats, project_costs, supplier_stats, data_completeness, veg_data)
-    send_card(token, stats, project_costs, analysis_text)
+    analysis_text = build_analysis_text(stats, project_costs, supplier_stats, data_completeness, veg_data, actual_start, actual_end)
+    send_card(token, stats, project_costs, analysis_text, actual_start, actual_end)
     archive_record(token, stats, project_costs, analysis_text)
 
     print('\n=== 全部完成 ===\n')
