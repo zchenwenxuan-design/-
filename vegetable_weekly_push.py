@@ -446,7 +446,8 @@ def _calculate_project_costs(veg_data, this_week_records, last_week_records):
                 'this_week_count': 0,
                 'last_week_amount': 0,
                 'last_week_qty': 0,
-                'alert_count': 0
+                'alert_count': 0,
+                'alert_vegs': []  # 记录异常食材名称列表
             }
         
         if amount:
@@ -483,6 +484,7 @@ def _calculate_project_costs(veg_data, this_week_records, last_week_records):
             avg_price = sum(data['prices']) / len(data['prices']) if data['prices'] else 0
             if week_avg > 0 and (avg_price - week_avg) / week_avg >= ALERT_THRESHOLD:
                 project_costs[project]['alert_count'] += 1
+                project_costs[project]['alert_vegs'].append(veg_name)
     
     # 转换为列表并排序
     result = []
@@ -503,6 +505,7 @@ def _calculate_project_costs(veg_data, this_week_records, last_week_records):
             'last_week_amount': last_amount,
             'last_week_qty': data['last_week_qty'],
             'alert_count': data['alert_count'],
+            'alert_vegs': data['alert_vegs'],
             'week_growth': week_growth,
             'avg_price': this_amount / data['this_week_qty'] if data['this_week_qty'] > 0 else 0
         })
@@ -932,7 +935,7 @@ def build_analysis_text(stats, project_costs, supplier_stats, potential_savings,
             lines.append(f"  [{grade_clean}] {supplier} | {projects_str} | 异常率 {alert_rate_str} | 均价偏离 {deviation_str} | 评分 {data['score']}")
         lines.append("")
     
-    # 3. 采购数量TOP5
+    # 3. 采购数量TOP5（显示最高价项目和最低价项目）
     sorted_by_qty = sorted(stats, key=lambda x: x['total_qty'], reverse=True)
     lines.append("📦 采购数量TOP5：")
     for i, s in enumerate(sorted_by_qty[:5], 1):
@@ -940,7 +943,11 @@ def build_analysis_text(stats, project_costs, supplier_stats, potential_savings,
         qty = s['total_qty']
         amount = s['total_amount']
         avg = s['week_avg']
+        max_p = s['max_price']
+        min_p = s['min_price']
         lines.append(f"  {i}. {veg}：{qty:.0f}斤 ¥{amount:.2f}（均价¥{avg:.2f}/斤）")
+        if max_p and min_p:
+            lines.append(f"     最高：{max_p['project']} ¥{max_p['avg_price']:.2f}/斤 | 最低：{min_p['project']} ¥{min_p['avg_price']:.2f}/斤")
     lines.append("")
 
     # 4. 项目采购成本TOP5（加上周对比）
@@ -964,14 +971,17 @@ def build_analysis_text(stats, project_costs, supplier_stats, potential_savings,
         lines.append(f"{i}. {alert_tag} {p['project']}：¥{p['this_week_amount']:.2f}（{p['this_week_qty']:.0f}斤，{p['this_week_count']}笔{'，异常'+str(p['alert_count'])+'种'}{growth_str}）")
     lines.append("")
 
-    # 5. 项目异常食材TOP5（按异常食材数量排序）
+    # 5. 项目异常食材TOP5（按异常食材数量排序，显示具体食材）
     projects_with_alerts = [p for p in project_costs if p.get('alert_count', 0) > 0]
     if projects_with_alerts:
         sorted_by_alerts = sorted(projects_with_alerts, key=lambda x: x['alert_count'], reverse=True)
         lines.append("⚠️ 项目异常食材TOP5（价差≥15%的食材数量）：")
         for i, p in enumerate(sorted_by_alerts[:5], 1):
             alert_count = p['alert_count']
+            alert_vegs = p.get('alert_vegs', [])
+            veg_str = '、'.join(alert_vegs) if alert_vegs else '无'
             lines.append(f"  {i}. {p['project']}：{alert_count}种食材异常（总采购¥{p['this_week_amount']:.2f}）")
+            lines.append(f"     涉及：{veg_str}")
         lines.append("")
     else:
         lines.append("✅ 本周各项目无异常食材")
