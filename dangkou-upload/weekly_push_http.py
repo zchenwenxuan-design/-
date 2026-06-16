@@ -31,6 +31,7 @@ CHAT_ID = os.environ.get('FEISHU_CHAT_ID', 'oc_214e828c8acf75a362ca87df4e96eb2e'
 BASE_TOKEN = 'CWRUbNJLZa5BmSsuWx1cvcoFnsd'
 TABLE_SNUM = 'tblLiIxSybeE9AfV'
 TABLE_ARCHIVE = 'tblBBBfEpOKGPSkA'
+TABLE_SUMMARY = 'tblwUyMTgGVONSSv'  # 「汇总」每周看板（新增）
 CHART_FIELD_ID = 'fldxPLOcoS'
 
 API_BASE = 'https://open.feishu.cn/open-apis'
@@ -354,6 +355,7 @@ def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text,
     file_token = upload_result.get('file_token', '')
     print(f"  file_token: {file_token}")
 
+    # 1. 归档到「档口」分析看板（保留原有逻辑）
     records_data = [{
         'fields': {
             '标题': title,
@@ -369,7 +371,30 @@ def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text,
                        f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/batch_create',
                        token, json_data={'records': records_data})
     record_id = result.get('records', [{}])[0].get('record_id', '')
-    print(f"  归档记录已创建: {record_id}")
+    print(f"  「档口」分析看板归档记录已创建: {record_id}")
+
+    # 2. 归档到「汇总」每周看板（新增）
+    print('  [Step 7.2] 归档到「汇总」每周看板...')
+    # 生成 HTML 页面预览链接（GitHub Pages）
+    html_filename = f"{today.replace('.', '-')}-merchant.html"
+    page_preview_url = f"https://zchenwenxuan-design.github.io/veg-aggregate/reports/{html_filename}"
+
+    summary_records_data = [{
+        'fields': {
+            '标题': title,
+            '推送日期': push_ts,
+            '类型': '招商',
+            '推送内容': detail_text,
+            '页面预览': page_preview_url,
+        }
+    }]
+
+    result2 = api_call('POST',
+                        f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_SUMMARY}/records/batch_create',
+                        token, json_data={'records': summary_records_data})
+    summary_record_id = result2.get('records', [{}])[0].get('record_id', '')
+    print(f"  「汇总」每周看板归档记录已创建: {summary_record_id}")
+
     return record_id
 
 
