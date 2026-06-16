@@ -130,7 +130,7 @@ def fetch_records(token):
     while True:
         params = {'page_size': 500}
         if page_token:
-            params['page_token'] = page_token
+            params["page_token"] = page_token
         data = api_call('GET', f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_SNUM}/records',
                         token, params=params)
         items = data.get('items', [])
@@ -207,37 +207,45 @@ def parse_and_stats(records):
     projects = {}
     for pname, snum, status in raw:
         if pname not in projects:
-            projects[pname] = {'ops': 0, 'vacs': 0, 'vac_nums': []}
+            projects[pname] = {'ops': 0, 'vacs': 0, 'vac_nums': [], 'pending': 0, 'pending_nums': []}
         if status == '营业中':
             projects[pname]['ops'] += 1
         elif status == '待招商':
             projects[pname]['vacs'] += 1
             projects[pname]['vac_nums'].append(snum)
+        elif status == '待入场':
+            projects[pname]['pending'] += 1
+            projects[pname]['pending_nums'].append(snum)
 
-    # 只保留有待招商的项目
-    vac_projects = {k: v for k, v in projects.items() if v['vacs'] > 0}
-    total_vacs = sum(v['vacs'] for v in vac_projects.values())
-    total_all = sum(v['ops'] + v['vacs'] for v in vac_projects.values())
-    vac_rate = total_vacs / total_all * 100 if total_all else 0
+    # 只保留有待招商或待入场的项目
+    active_projects = {k: v for k, v in projects.items() if v['vacs'] > 0 or v['pending'] > 0}
+    total_vacs = sum(v['vacs'] for v in active_projects.values())
+    total_pending = sum(v['pending'] for v in active_projects.values())
+    total_all = sum(v['ops'] + v['vacs'] + v['pending'] for v in active_projects.values())
+    vac_rate = (total_vacs + total_pending) / total_all * 100 if total_all else 0
 
-    print(f"  有待招商项目: {len(vac_projects)} 个")
+    print(f"  有待招商/待入场项目: {len(active_projects)} 个")
     print(f"  待招商档口数: {total_vacs}")
+    print(f"  待入场档口数: {total_pending}")
     print(f"  空置率: {vac_rate:.2f}%")
-    return projects, vac_projects, total_vacs, total_all, vac_rate
+    return projects, active_projects, total_vacs, total_pending, total_all, vac_rate
 
 
 # ========== Step 3: 生成柱形图 ==========
-def generate_chart(vac_projects):
+def generate_chart(active_projects, total_ops, total_vacs, total_pending):
     print('\n[Step 3] 生成柱形图...')
     import urllib.parse
-    sorted_items = sorted(vac_projects.items(), key=lambda x: x[1]['vacs'], reverse=True)
+    sorted_items = sorted(active_projects.items(), key=lambda x: x[1]['vacs'] + x[1]['pending'], reverse=True)
+
+    # 图例标签带数值
     chart_config = {
         'type': 'horizontalBar',
         'data': {
             'labels': [k for k, v in sorted_items],
             'datasets': [
-                {'label': '营业中', 'data': [v['ops'] for k, v in sorted_items], 'backgroundColor': '#378ADD'},
-                {'label': '待招商', 'data': [v['vacs'] for k, v in sorted_items], 'backgroundColor': '#EF9F27'}
+                {'label': f'营业中 ({total_ops})', 'data': [v['ops'] for k, v in sorted_items], 'backgroundColor': '#378ADD'},
+                {'label': f'待招商 ({total_vacs})', 'data': [v['vacs'] for k, v in sorted_items], 'backgroundColor': '#EF9F27'},
+                {'label': f'待入场 ({total_pending})', 'data': [v['pending'] for k, v in sorted_items], 'backgroundColor': '#34C724'}
             ]
         },
         'options': {
@@ -245,11 +253,21 @@ def generate_chart(vac_projects):
                 'xAxes': [{'stacked': True, 'ticks': {'stepSize': 5}}],
                 'yAxes': [{'stacked': True}]
             },
-            'legend': {'position': 'bottom', 'labels': {'fontSize': 13, 'padding': 16, 'usePointStyle': True}}
+            'legend': {
+                'position': 'bottom',
+                'labels': {
+                    'fontSize': 13,
+                    'padding': 16,
+                    'usePointStyle': True,
+                    'generateLabels': {
+                        'fontStyle': 'bold'
+                    }
+                }
+            }
         }
     }
     chart_json = json.dumps(chart_config, separators=(',', ':'))
-    url = 'https://quickchart.io/chart?w=600&h=350&c=' + urllib.parse.quote(chart_json)
+    url = 'https://quickchart.io/chart?w=700&h=400&c=' + urllib.parse.quote(chart_json)
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
     png_bytes = resp.content
@@ -271,34 +289,61 @@ def upload_image(token, png_bytes):
 
 
 # ========== Step 5: 构建明细文本 ==========
-def build_detail_text(projects, vac_projects):
+def build_detail_text(active_projects):
     def snum_key(s):
         try: return int(s)
         except: return 9999
 
-    vac_list = sorted(vac_projects.items(), key=lambda x: x[1]['vacs'], reverse=True)
+    vac_list = sorted(active_projects.items(), key=lambda x: x[1]['vacs'] + x[1]['pending'], reverse=True)
     lines = []
     for i, (pname, pdata) in enumerate(vac_list):
         vac_nums = sorted(pdata['vac_nums'], key=snum_key)
-        f1 = [s for s in vac_nums if 0 < int(s) < 200]
-        f2 = [s for s in vac_nums if 200 <= int(s) < 300]
-        f3 = [s for s in vac_nums if int(s) >= 300]
-        t = pdata['ops'] + pdata['vacs']
-        r = pdata['vacs'] / t * 100 if t else 0
+        pending_nums = sorted(pdata['pending_nums'], key=snum_key)
+        t = pdata['ops'] + pdata['vacs'] + pdata['pending']
+        r = (pdata['vacs'] + pdata['pending']) / t * 100 if t else 0
+
         if i > 0:
             lines.append('')
-        lines.append(f"「{pname}」-共{t}个档口，待招商{pdata['vacs']}个（空置率：{r:.2f}%）")
-        if f1:
-            lines.append(f"1F：{', '.join(f1)}")
-        if f2:
-            lines.append(f"2F：{', '.join(f2)}")
-        if f3:
-            lines.append(f"3F：{', '.join(f3)}")
+
+        # 项目总览行
+        summary_parts = [f"共{t}个档口"]
+        if pdata['vacs'] > 0:
+            summary_parts.append(f"待招商{pdata['vacs']}个")
+        if pdata['pending'] > 0:
+            summary_parts.append(f"待入场{pdata['pending']}个")
+        lines.append(f"「{pname}」-{', '.join(summary_parts)}（空置率：{r:.2f}%）")
+
+        # 待招商明细
+        if vac_nums:
+            f1 = [s for s in vac_nums if 0 < int(s) < 200]
+            f2 = [s for s in vac_nums if 200 <= int(s) < 300]
+            f3 = [s for s in vac_nums if int(s) >= 300]
+            lines.append("待招商：")
+            if f1:
+                lines.append(f"  1F：{', '.join(f1)}")
+            if f2:
+                lines.append(f"  2F：{', '.join(f2)}")
+            if f3:
+                lines.append(f"  3F：{', '.join(f3)}")
+
+        # 待入场明细
+        if pending_nums:
+            p1 = [s for s in pending_nums if 0 < int(s) < 200]
+            p2 = [s for s in pending_nums if 200 <= int(s) < 300]
+            p3 = [s for s in pending_nums if int(s) >= 300]
+            lines.append("待入场：")
+            if p1:
+                lines.append(f"  1F：{', '.join(p1)}")
+            if p2:
+                lines.append(f"  2F：{', '.join(p2)}")
+            if p3:
+                lines.append(f"  3F：{', '.join(p3)}")
+
     return '\n'.join(lines)
 
 
 # ========== Step 6: 发送卡片 ==========
-def send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail_text):
+def send_card(token, image_key, total_vacs, total_pending, vac_rate, active_projects_count, detail_text):
     print('\n[Step 6] 发送卡片到群...')
     today = datetime.now().strftime('%Y.%m.%d')
     card = {
@@ -313,7 +358,7 @@ def send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail
              "mode": "fit_horizontal", "preview": True},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content":
-                f"待招商项目 **{vac_projects_count}** 个　待招商数量 **{total_vacs}** 　空置率 **{vac_rate:.2f}%**"}},
+                f"待招商项目 **{active_projects_count}** 个　待招商 **{total_vacs}** 个　待入场 **{total_pending}** 个　空置率 **{vac_rate:.2f}%**"}},
             {"tag": "hr"},
             {"tag": "div", "text": {"tag": "lark_md", "content": detail_text}},
             {"tag": "hr"},
@@ -333,7 +378,7 @@ def send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail
 
 
 # ========== Step 7: 归档到多维表格（含附件上传） ==========
-def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text, png_bytes):
+def archive_record(token, total_vacs, total_pending, vac_rate, active_projects_count, detail_text, png_bytes):
     print('\n[Step 7] 归档到多维表格...')
     today = datetime.now().strftime('%Y.%m.%d')
     title = f"档口招商周报{today}"
@@ -362,7 +407,7 @@ def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text,
             '推送日期': push_ts,
             '待招商': total_vacs,
             '空置率(%)': round(vac_rate / 100, 4),   # 小数 → 飞书百分比字段
-            '待招商项目数': vac_projects_count,
+            '待招商项目数': active_projects_count,
             '招商情况': detail_text,
             '柱形图': [{'file_token': file_token}] if file_token else []
         }
@@ -375,17 +420,23 @@ def archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text,
 
     # 2. 归档到「汇总」每周看板（新增）
     print('  [Step 7.2] 归档到「汇总」每周看板...')
-    # 生成 HTML 页面预览链接（GitHub Pages）
-    html_filename = f"{today.replace('.', '-')}-merchant.html"
-    page_preview_url = f"https://zchenwenxuan-design.github.io/veg-aggregate/reports/{html_filename}"
+
+    # 构建含KPI汇总的完整推送内容
+    kpi_summary = (
+        f"【本周概况】\n"
+        f"待招商项目：{active_projects_count}个\n"
+        f"待招商数量：{total_vacs}个\n"
+        f"待入场数量：{total_pending}个\n"
+        f"总空置率：{vac_rate:.2f}%\n"
+    )
+    full_content = kpi_summary + "\n" + detail_text
 
     summary_records_data = [{
         'fields': {
             '标题': title,
             '推送日期': push_ts,
             '类型': '招商',
-            '推送内容': detail_text,
-            '页面预览': page_preview_url,
+            '推送内容': full_content,
         }
     }]
 
@@ -404,14 +455,15 @@ def main():
     token = get_tenant_token()
 
     records = fetch_records(token)
-    projects, vac_projects, total_vacs, total_all, vac_rate = parse_and_stats(records)
-    vac_projects_count = len(vac_projects)
+    projects, active_projects, total_vacs, total_pending, total_all, vac_rate = parse_and_stats(records)
+    active_projects_count = len(active_projects)
+    total_ops = sum(v['ops'] for v in active_projects.values())
 
-    png_bytes = generate_chart(vac_projects)
+    png_bytes = generate_chart(active_projects, total_ops, total_vacs, total_pending)
     image_key = upload_image(token, png_bytes)
-    detail_text = build_detail_text(projects, vac_projects)
-    send_card(token, image_key, total_vacs, vac_rate, vac_projects_count, detail_text)
-    record_id = archive_record(token, total_vacs, vac_rate, vac_projects_count, detail_text, png_bytes)
+    detail_text = build_detail_text(active_projects)
+    send_card(token, image_key, total_vacs, total_pending, vac_rate, active_projects_count, detail_text)
+    record_id = archive_record(token, total_vacs, total_pending, vac_rate, active_projects_count, detail_text, png_bytes)
 
     print('\n=== 全部完成 ===\n')
 
