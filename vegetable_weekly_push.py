@@ -28,6 +28,7 @@ CHAT_ID = os.environ.get('FEISHU_CHAT_ID', 'oc_214e828c8acf75a362ca87df4e96eb2e'
 BASE_TOKEN = 'CWRUbNJLZa5BmSsuWx1cvcoFnsd'
 TABLE_DETAIL = 'tbl4aO9rKwKxlXzR'  # 「青菜」填报明细
 TABLE_ARCHIVE = 'tbl1ShD40AB0BeC0'  # 「青菜」分析看板
+TABLE_SUMMARY = 'tblwUyMTgGVONSSv'  # 「汇总」每周看板（新增）
 TABLE_SUPPLIER = 'tblgGb0oFtei8uAx'  # 供应商表
 
 API_BASE = 'https://open.feishu.cn/open-apis'
@@ -1007,7 +1008,7 @@ def send_card(token, stats, project_costs, analysis_text, actual_start, actual_e
 
 
 # ========== Step 5: 归档到多维表格 ==========
-def archive_record(token, stats, project_costs, analysis_text):
+def archive_record(token, stats, project_costs, analysis_text, actual_start='', actual_end=''):
     print('\n[Step 5] 归档到多维表格...')
     today = datetime.now().strftime('%Y.%m.%d')
     title = f"青菜价格周报{today}"
@@ -1017,7 +1018,9 @@ def archive_record(token, stats, project_costs, analysis_text):
     total_qty = sum(s['total_qty'] for s in stats)
     alert_count = len([s for s in stats if s['alert_level'] == 'high'])
     project_count = len(project_costs)
+    veg_count = len(stats)
 
+    # 1. 归档到「青菜」分析看板（保留原有逻辑）
     records_data = [{
         'fields': {
             '标题': title,
@@ -1035,7 +1038,31 @@ def archive_record(token, stats, project_costs, analysis_text):
                        f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_ARCHIVE}/records/batch_create',
                        token, json_data={'records': records_data})
     record_id = result.get('records', [{}])[0].get('record_id', '')
-    print(f"  归档记录已创建: {record_id}")
+    print(f"  「青菜」分析看板归档记录已创建: {record_id}")
+
+    # 2. 归档到「汇总」每周看板（新增）
+    print('  [Step 5.1] 归档到「汇总」每周看板...')
+    # 生成 HTML 页面预览链接（GitHub Pages）
+    period_str = f"{actual_start}~{actual_end}" if actual_start and actual_end else today
+    html_filename = f"{today.replace('.', '-')}-vegetable.html"
+    page_preview_url = f"https://zchenwenxuan-design.github.io/veg-aggregate/reports/{html_filename}"
+
+    summary_records_data = [{
+        'fields': {
+            '标题': title,
+            '推送日期': push_ts,
+            '类型': '青菜',
+            '推送内容': analysis_text,
+            '页面预览': page_preview_url,
+        }
+    }]
+
+    result2 = api_call('POST',
+                        f'/bitable/v1/apps/{BASE_TOKEN}/tables/{TABLE_SUMMARY}/records/batch_create',
+                        token, json_data={'records': summary_records_data})
+    summary_record_id = result2.get('records', [{}])[0].get('record_id', '')
+    print(f"  「汇总」每周看板归档记录已创建: {summary_record_id}")
+
     return record_id
 
 
@@ -1060,7 +1087,7 @@ def main():
 
     analysis_text = build_analysis_text(stats, project_costs, supplier_stats, data_completeness, veg_data, actual_start, actual_end)
     send_card(token, stats, project_costs, analysis_text, actual_start, actual_end)
-    archive_record(token, stats, project_costs, analysis_text)
+    archive_record(token, stats, project_costs, analysis_text, actual_start, actual_end)
 
     print('\n=== 全部完成 ===\n')
 
