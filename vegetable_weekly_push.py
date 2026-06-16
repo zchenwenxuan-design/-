@@ -1042,18 +1042,26 @@ def archive_record(token, stats, project_costs, analysis_text, actual_start='', 
 
     # 2. 归档到「汇总」每周看板（新增）
     print('  [Step 5.1] 归档到「汇总」每周看板...')
-    # 生成 HTML 页面预览链接（GitHub Pages）
+
+    # 构建含KPI汇总的完整推送内容
     period_str = f"{actual_start}~{actual_end}" if actual_start and actual_end else today
-    html_filename = f"{today.replace('.', '-')}-vegetable.html"
-    page_preview_url = f"https://zchenwenxuan-design.github.io/veg-aggregate/reports/{html_filename}"
+    kpi_summary = (
+        f"【本周概况】\n"
+        f"项目数：{project_count}个\n"
+        f"食材种类：{veg_count}种\n"
+        f"采购总量：{total_qty:.0f}斤\n"
+        f"采购总金额：¥{total_amount:.2f}\n"
+        f"异常食材：{alert_count}种\n"
+        f"数据周期：{period_str}\n"
+    )
+    full_content = kpi_summary + "\n" + analysis_text
 
     summary_records_data = [{
         'fields': {
             '标题': title,
             '推送日期': push_ts,
             '类型': '青菜',
-            '推送内容': analysis_text,
-            '页面预览': page_preview_url,
+            '推送内容': full_content,
         }
     }]
 
